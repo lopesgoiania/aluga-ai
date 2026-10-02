@@ -1,0 +1,25 @@
+.context-group { position:relative }
+.assign-inline { min-height:30px;display:flex;align-items:center;gap:6px;margin-top:8px;padding:0 8px;border:1px solid #e0e7ed;border-radius:6px;background:#fff;color:#6c7e8d;font-size:9px;cursor:pointer }
+.assign-inline svg:last-child { margin-left:auto }
+.assignment-menu { position:absolute;z-index:10;top:54px;left:2px;right:2px;padding:4px;background:#fff;border:1px solid #e1e8ee;border-radius:8px;box-shadow:0 9px 23px rgba(28,43,51,.15) }
+.assignment-menu button { width:100%;min-height:37px;display:flex;align-items:center;gap:7px;border:0;border-radius:5px;padding:0 6px;background:transparent;text-align:left;color:#506475;font-size:9px;cursor:pointer }
+.assignment-menu button:hover { background:#f2f7fb }
+.assignment-menu button>span:nth-child(2) { flex:1 }
+.assignment-menu button small { color:#91a0ac;font-size:8px }
+.queue-assigned { display:flex;align-items:center;gap:5px;margin-top:8px;color:#718393;font-size:9px }
+.queue-assigned b { color:#41586a;font-weight:600 }
+.composer-note-mode .composer-input-wrap { background:#fffcf3;border-color:#ecdcae }
+.composer-note-mode .internal-note { color:#8e6b1e;background:#fff8e7;border-color:#e9d9ae }
+.mobile-nav-backdrop { display:none }
+@media(max-width:767px) {
+  .mobile-nav-backdrop { display:block;position:fixed;inset:0;z-index:39;border:0;background:rgba(14,24,39,.48);padding:0 }
+  .sidebar.mobile-nav-open { display:flex;position:fixed;z-index:40;inset:0 auto 0 0;width:min(290px,84vw);min-height:100dvh;flex-basis:auto;align-items:stretch;padding:22px 14px 15px;box-shadow:12px 0 34px rgba(14,24,39,.19) }
+  .sidebar.mobile-nav-open .brand-lockup { justify-content:flex-start;margin:0 8px 30px }
+  .sidebar.mobile-nav-open .brand-lockup>span:nth-child(2),.sidebar.mobile-nav-open .side-label,.sidebar.mobile-nav-open .workspace-switch>span:not(.workspace-bullet),.sidebar.mobile-nav-open .workspace-switch>svg,.sidebar.mobile-nav-open .nav-link>span:not(.nav-badge),.sidebar.mobile-nav-open .demo-rail>span:nth-child(2),.sidebar.mobile-nav-open .profile-chip>span:nth-child(2),.sidebar.mobile-nav-open .profile-chip>svg { display:block }
+  .sidebar.mobile-nav-open .side-label { font-size:9px }
+  .sidebar.mobile-nav-open .workspace-switch { justify-content:flex-start;margin:0 4px 26px;padding:0 10px;border:1px solid #35495d }
+  .sidebar.mobile-nav-open .nav-link { justify-content:flex-start;padding:0 11px }
+  .sidebar.mobile-nav-open .nav-link .nav-badge { position:static;min-width:21px;line-height:19px;font-size:10px;margin-left:auto }
+  .sidebar.mobile-nav-open .demo-rail { justify-content:flex-start;padding:11px 9px }
+  .sidebar.mobile-nav-open .profile-chip { justify-content:flex-start }
+}

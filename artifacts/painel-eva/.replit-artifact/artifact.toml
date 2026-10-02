@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Painel Eva"
+description = "Painel operacional para a equipe Lopes Aluga acompanhar conversas de WhatsApp conduzidas pela Eva, assumir atendimentos, gerenciar leads e imóveis e monitorar alertas. Inclui dados fictícios locais e fluxos demonstrativos, sem conexões reais nesta etapa."
+version = "1.0.0"
+id = "artifacts/painel-eva"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25528
+
+[services.development]
+run = "pnpm --filter @workspace/painel-eva run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/painel-eva", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/painel-eva/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25528"
+BASE_PATH = "/"

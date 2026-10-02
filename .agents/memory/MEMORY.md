@@ -1,0 +1,1 @@
+- [Painel Eva integration boundary](painel-eva-integration-boundary.md) — Keep the existing Eva, n8n, Evolution, and Supabase architecture intact when real integrations are added.

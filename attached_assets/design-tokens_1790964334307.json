@@ -1,0 +1,109 @@
+{
+  "name": "Painel Eva — Lopes Aluga",
+  "version": "1.0.0",
+  "language": "pt-BR",
+  "notes": [
+    "Sistema visual original inspirado nas três referências anexas; não copiar logos, nomes, marcas ou interfaces literalmente.",
+    "Cores de referência foram extraídas das imagens e do SVG; tokens semânticos abaixo são uma proposta coerente para o Painel Eva.",
+    "O azul é a marca operacional; o violeta identifica a Eva/IA; verde identifica sucesso/conexão; vermelho identifica erros ou urgência."
+  ],
+  "referencePalette": {
+    "dashboard": ["#EFF3F7", "#B6C6DA", "#6A61E2", "#5DD4E2", "#2F2689"],
+    "kanban": ["#F4F7FA", "#5A55E0", "#191A20", "#D83537"],
+    "svg": ["#0669E1", "#00D15E", "#4F46E5", "#E2E8F0", "#1C2B33", "#64748B"]
+  },
+  "color": {
+    "brand": {
+      "primary": "#0669E1",
+      "primaryHover": "#0557BB",
+      "primarySoft": "#EFF6FF",
+      "ai": "#4F46E5",
+      "aiSoft": "#EEF2FF",
+      "teal": "#0F9FAE",
+      "tealSoft": "#ECFEFF"
+    },
+    "background": {
+      "page": "#F4F7FA",
+      "surface": "#FFFFFF",
+      "surfaceAlt": "#EFF3F7",
+      "surfaceSelected": "#EFF6FF",
+      "backdrop": "#0E182766"
+    },
+    "text": {
+      "primary": "#1C2B33",
+      "secondary": "#475569",
+      "muted": "#64748B",
+      "onBrand": "#FFFFFF",
+      "link": "#0669E1"
+    },
+    "border": {
+      "subtle": "#E2E8F0",
+      "default": "#CBD5E1",
+      "strong": "#94A3B8",
+      "focus": "#0669E1"
+    },
+    "semantic": {
+      "success": {"strong": "#166534", "fill": "#DCFCE7", "icon": "#16A34A"},
+      "warning": {"strong": "#854D0E", "fill": "#FEF3C7", "icon": "#D97706"},
+      "danger": {"strong": "#B42318", "fill": "#FEE4E2", "icon": "#D92D20"},
+      "info": {"strong": "#1E40AF", "fill": "#DBEAFE", "icon": "#2563EB"}
+    },
+    "conversation": {
+      "customerBubble": "#F1F5F9",
+      "humanBubble": "#EFF6FF",
+      "aiBubble": "#EEF2FF",
+      "systemEvent": "#F8FAFC"
+    },
+    "chart": ["#4F46E5", "#0669E1", "#0F9FAE", "#84CC16", "#F59E0B", "#D92D20"]
+  },
+  "typography": {
+    "fontFamily": "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
+    "fontWeight": {"regular": 400, "medium": 500, "semibold": 600, "bold": 700},
+    "sizePx": {"xs": 12, "sm": 14, "base": 16, "lg": 18, "xl": 20, "title": 24, "display": 30},
+    "lineHeight": {"tight": 1.25, "normal": 1.5, "relaxed": 1.65},
+    "usage": {
+      "pageTitle": {"sizePx": 24, "weight": 700},
+      "sectionTitle": {"sizePx": 18, "weight": 600},
+      "body": {"sizePx": 14, "weight": 400},
+      "metric": {"sizePx": 30, "weight": 700},
+      "caption": {"sizePx": 12, "weight": 500}
+    }
+  },
+  "spacePx": {"0": 0, "1": 4, "2": 8, "3": 12, "4": 16, "5": 20, "6": 24, "8": 32, "10": 40, "12": 48, "16": 64},
+  "radiusPx": {"xs": 6, "sm": 8, "md": 12, "lg": 16, "xl": 20, "pill": 999},
+  "shadow": {
+    "card": "0 4px 18px rgba(28,43,51,0.06)",
+    "floating": "0 12px 36px rgba(28,43,51,0.12)",
+    "focus": "0 0 0 3px rgba(6,105,225,0.18)"
+  },
+  "layout": {
+    "desktopMinPx": 1280,
+    "tabletMaxPx": 1023,
+    "mobileMaxPx": 767,
+    "sidebarWidthPx": 244,
+    "topbarHeightPx": 64,
+    "contentMaxWidthPx": 1600,
+    "inboxListWidthPx": 336,
+    "conversationContextWidthPx": 320,
+    "pageGutterDesktopPx": 24,
+    "pageGutterMobilePx": 16,
+    "gridGapPx": 16
+  },
+  "component": {
+    "button": {"heightSmPx": 32, "heightMdPx": 40, "heightLgPx": 48, "radius": "md"},
+    "input": {"heightPx": 40, "radius": "sm"},
+    "card": {"paddingPx": 20, "radius": "lg", "border": "subtle", "shadow": "card"},
+    "tag": {"heightPx": 24, "radius": "pill"},
+    "avatar": {"smPx": 28, "mdPx": 36, "lgPx": 44},
+    "navigationItem": {"heightPx": 42, "radius": "md"},
+    "tableRow": {"minHeightPx": 52},
+    "touchTargetMinPx": 44
+  },
+  "motion": {"fastMs": 120, "normalMs": 180, "slowMs": 240, "easing": "cubic-bezier(0.2, 0, 0, 1)", "respectReducedMotion": true},
+  "accessibility": {
+    "minimumTextContrast": "WCAG AA 4.5:1 para texto normal",
+    "focus": "anel visível de 3px em controles interativos",
+    "status": "estado sempre comunicado por texto/ícone além da cor",
+    "responsive": "navegação por teclado e áreas de toque de pelo menos 44px"
+  }
+}
