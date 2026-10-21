@@ -732,7 +732,14 @@ router.post("/connection/instances/:name/disconnect", async (req: AuthRequest, r
   if (!/^[a-zA-Z0-9_-]{3,48}$/.test(name)) throw new UpstreamError("Instância inválida", 400);
   const rows = await evolution("/instance/fetchInstances");
   if (!Array.isArray(rows) || !rows.some((row: any) => row.name === name)) throw new UpstreamError("Instância não encontrada", 404);
-  const result = await evolution(`/instance/logout/${encodeURIComponent(name)}`, { method: "DELETE" }, 30000);
+  let result: unknown;
+  try { result = await evolution(`/instance/logout/${encodeURIComponent(name)}`, { method: "DELETE" }, 30000); }
+  catch (error) {
+    // Some Evolution versions close the socket before returning an error.
+    const state = await evolution(`/instance/connectionState/${encodeURIComponent(name)}`).catch(() => null);
+    if (!["close", "closed", "disconnected"].includes(String(state?.instance?.state ?? state?.state).toLowerCase())) throw error;
+    result = { state: state?.instance?.state ?? state?.state };
+  }
   await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "instance_disconnected", details: { instance: name } } });
   res.json({ disconnected: true, result });
 });
