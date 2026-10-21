@@ -13,6 +13,7 @@ const contactId = '33333333-3333-4333-8333-333333333333';
 const outboundId = '66666666-6666-4666-8666-666666666666';
 const mediaId = '88888888-8888-4888-8888-888888888888';
 const teamId = '99999999-9999-4999-8999-999999999999';
+const invitedId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 const listen = (server) => new Promise((resolvePort) => server.listen(0, '127.0.0.1', () => resolvePort(server.address().port)));
 const close = (server) => new Promise((resolveClose) => server.close(resolveClose));
@@ -25,6 +26,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let routedTarget = '';
   let archiveReady = false;
   let disconnected = false;
+  let attendantRemoved = false;
   const reservations = new Set();
   const upstream = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://local');
@@ -34,10 +36,25 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       const attendant = body.email === 'attendant@example.test';
       return json({ access_token: attendant ? 'attendant-access' : 'test-access', refresh_token: 'test-refresh', expires_in: 3600 });
     }
-    if (url.pathname === '/auth/v1/user') return json({ id: req.headers.authorization === 'Bearer attendant-access' ? attendantId : userId });
+    if (url.pathname === '/auth/v1/user') {
+      if (req.method === 'PUT') { const body = JSON.parse(await new Response(req).text()); assert.equal(body.password, 'senha-segura-123'); }
+      return json({ id: req.headers.authorization === 'Bearer attendant-access' ? attendantId : userId });
+    }
+    if (url.pathname === '/auth/v1/admin/users') return json({ users: [{ id: userId, email: 'admin@example.test', email_confirmed_at: '2026-10-01T00:00:00Z' }, { id: attendantId, email: 'attendant@example.test', invited_at: '2026-10-20T00:00:00Z' }] });
+    if (url.pathname === `/auth/v1/admin/users/${attendantId}`) return json({ id: attendantId, email: 'attendant@example.test', invited_at: '2026-10-20T00:00:00Z' });
+    if (url.pathname === '/auth/v1/invite') {
+      const body = JSON.parse(await new Response(req).text());
+      return json({ id: body.email === 'attendant@example.test' ? attendantId : invitedId, email: body.email });
+    }
     if (url.pathname === '/rest/v1/panel_operators') {
-      if (req.method === 'PATCH') return json([{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true }]);
+      if (req.method === 'PATCH') {
+        if (url.searchParams.get('user_id') === `eq.${attendantId}`) { attendantRemoved = true; return json([{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: false }]); }
+        return json([{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true }]);
+      }
+      if (req.method === 'POST') return json([{ user_id: invitedId, display_name: 'Novo Usuário', role: 'attendant', active: true }]);
       if (url.searchParams.get('active') === 'eq.true') return json([{ user_id: userId, display_name: 'Operador Teste', role: 'admin', active: true }, { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }]);
+      if (url.searchParams.get('user_id') === `eq.${attendantId}`) return json([{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: !attendantRemoved }]);
+      if (!url.searchParams.has('user_id')) return json([{ user_id: userId, display_name: 'Operador Teste', role: 'admin', active: true }, { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }]);
       return json(url.searchParams.get('user_id') === `eq.${attendantId}` ? [{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }] : [{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true }]);
     }
     if (url.pathname === '/rest/v1/chat_sessions') return json([
@@ -46,6 +63,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     ]);
     if (url.pathname === '/rest/v1/contacts') return json([{ id: contactId, name: 'Cliente Teste', phone: '5562999999999', metadata: {} }]);
     if (url.pathname === '/rest/v1/human_handoffs') {
+      if (req.method === 'GET' && url.searchParams.has('assigned_to')) return json([]);
       if (req.method === 'PATCH') { assert.equal(url.searchParams.get('assigned_to'), 'eq.WhatsApp'); assignment = 'Operador Teste'; return json([{ id: 'h1', session_id: sessionId, status: 'accepted', assigned_to: assignment }]); }
       return json([{ id: 'h1', session_id: sessionId, status: 'accepted', assigned_to: assignment, created_at: '2026-10-02T12:00:00Z' }]);
     }
@@ -62,7 +80,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       if (req.method === 'PATCH') return json([{ id: teamId, name: 'Comercial', ai_enabled: true, active: true }]);
       return json([{ id: teamId, name: 'Comercial', ai_enabled: false, active: true }]);
     }
-    if (url.pathname === '/rest/v1/panel_team_members') return json([]);
+    if (url.pathname === '/rest/v1/panel_team_members') return json(req.method === 'POST' ? [{ team_id: teamId, user_id: invitedId, active: true }] : []);
     if (url.pathname === '/storage/v1/object/authenticated/eva-media/Teste/AUDIO-1') { res.writeHead(200, { 'Content-Type': 'audio/ogg' }); res.end('archived-media'); return; }
     if (url.pathname === '/rest/v1/panel_audit_log') return json({});
     if (url.pathname === '/rest/v1/property_interests') return json([]);
@@ -115,11 +133,20 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(login.status, 200);
     const cookie = login.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
     const get = (path) => fetch(`${base}${path}`, { headers: { Cookie: cookie } });
+    const acceptInvite = await fetch(`${base}/auth/accept-invite`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accessToken: 'attendant-access', refreshToken: 'test-refresh', password: 'senha-segura-123' }) });
+    assert.equal((await acceptInvite.json()).operator.user_id, attendantId);
     const conversations = await (await get('/conversations')).json();
     assert.equal(conversations.conversations.length, 2, 'Mesmo contato em canais distintos deve gerar duas conversas');
     assert.equal(conversations.conversations[0].contact.name, 'Cliente Teste');
     assert.equal(conversations.conversations[0].tags[0].slug, 'inquilino');
     assert.equal((await (await get('/operators')).json()).operators.length, 2);
+    const managed = await (await get('/operators/manage')).json();
+    assert.equal(managed.operators.find((item) => item.user_id === attendantId).email, 'attendant@example.test');
+    assert.equal(managed.operators.find((item) => item.user_id === attendantId).email_confirmed_at, null);
+    const invite = await fetch(`${base}/operators/invite`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'novo@example.test', displayName: 'Novo Usuário', role: 'attendant', teamIds: [teamId] }) });
+    assert.equal((await invite.json()).invitationSent, true);
+    const resend = await fetch(`${base}/operators/${attendantId}/resend-invite`, { method: 'POST', headers: { Cookie: cookie } });
+    assert.equal((await resend.json()).sent, true);
     const signature = await fetch(`${base}/operators/me`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ signature: 'Vilarinho' }) });
     assert.equal((await signature.json()).operator.signature, 'Vilarinho');
     const detail = await (await get(`/conversations/${sessionId}`)).json();
@@ -178,5 +205,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal((await attendantGet('/alerts')).status, 403);
     assert.equal((await fetch(`${base}/alerts/outbound/${outboundId}/reconcile`, { method: 'POST', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'failed' }) })).status, 403);
     assert.equal((await attendantGet('/connection/qr')).status, 403);
+    const removeUser = await fetch(`${base}/operators/${attendantId}`, { method: 'DELETE', headers: { Cookie: cookie } });
+    assert.equal((await removeUser.json()).historyPreserved, true);
+    assert.equal((await attendantGet('/conversations')).status, 403, 'Acesso removido deve ser bloqueado mesmo com sessão aberta');
   } finally { child.kill(); await close(upstream); }
 });

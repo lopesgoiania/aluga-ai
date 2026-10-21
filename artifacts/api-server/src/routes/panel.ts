@@ -91,6 +91,12 @@ const signedReply = (operator: Operator, message: string) => {
   const raw = String(operator.signature || operator.display_name).replace(/[\r\n*]/g, " ").trim().slice(0, 80).replace(/:$/, "");
   return `*${raw}:*\n${message}`;
 };
+const invitePath = (req: Request) => {
+  const host = req.get("host");
+  const protocol = req.get("x-forwarded-proto")?.split(",")[0]?.trim() || req.protocol;
+  const publicUrl = process.env.PANEL_PUBLIC_URL?.trim() || (host ? `${protocol}://${host}/` : "");
+  return publicUrl ? `invite?redirect_to=${encodeURIComponent(publicUrl)}` : "invite";
+};
 
 router.get("/setup", (_req, res) => {
   const required = ["SUPABASE_AGENT_URL", "SUPABASE_AGENT_ANON_KEY", "SUPABASE_AGENT_SERVICE_ROLE_KEY", "SUPABASE_CATALOG_URL", "SUPABASE_CATALOG_SERVICE_ROLE_KEY", "EVOLUTION_API_URL", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE"];
@@ -109,6 +115,16 @@ router.post("/auth/login", async (req, res) => {
   }
   const operator = await operatorFor(session.access_token);
   setTokens(res, session);
+  res.json({ operator });
+});
+router.post("/auth/accept-invite", async (req, res) => {
+  const accessToken = String(req.body?.accessToken ?? "");
+  const refreshToken = String(req.body?.refreshToken ?? "");
+  const password = String(req.body?.password ?? "");
+  if (!accessToken || !refreshToken || password.length < 10 || password.length > 128) throw new UpstreamError("Use uma senha de 10 a 128 caracteres", 400);
+  const operator = await operatorFor(accessToken);
+  await authRequest("user", { method: "PUT", headers: { Authorization: `Bearer ${accessToken}` }, body: JSON.stringify({ password }) });
+  setTokens(res, { access_token: accessToken, refresh_token: refreshToken, expires_in: 3600 });
   res.json({ operator });
 });
 router.post("/auth/logout", (_req, res) => {
@@ -259,8 +275,15 @@ router.get("/operators", async (_req, res) => {
 });
 router.get("/operators/manage", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin", "supervisor"]);
-  const operators = await agentRest("panel_operators", { params: { select: "user_id,display_name,role,active,created_at", order: "display_name.asc" } });
-  res.json({ operators });
+  const [operators, authUsers] = await Promise.all([
+    agentRest("panel_operators", { params: { select: "user_id,display_name,role,active,created_at", order: "display_name.asc" } }),
+    authRequest("admin/users?page=1&per_page=1000", { headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` } }),
+  ]);
+  const authById = new Map((authUsers?.users ?? []).map((user: any) => [user.id, user]));
+  res.json({ operators: (operators as any[]).map((operator) => {
+    const user: any = authById.get(operator.user_id);
+    return { ...operator, email: user?.email ?? null, email_confirmed_at: user?.email_confirmed_at ?? null, invited_at: user?.invited_at ?? null };
+  }) });
 });
 router.patch("/operators/me", async (req: AuthRequest, res) => {
   const signature = String(req.body?.signature ?? "").replace(/[\r\n*]/g, " ").trim().replace(/:$/, "");
@@ -274,13 +297,49 @@ router.post("/operators/invite", async (req: AuthRequest, res) => {
   const email = String(req.body?.email ?? "").trim().toLowerCase();
   const displayName = String(req.body?.displayName ?? "").trim();
   const role = String(req.body?.role ?? "attendant");
+  const teamIds = req.body?.teamIds ?? [];
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !displayName || displayName.length > 80 || !["admin", "supervisor", "attendant"].includes(role)) throw new UpstreamError("Informe e-mail, nome e função válidos", 400);
-  const invited = await authRequest("invite", { method: "POST", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` }, body: JSON.stringify({ email, data: { display_name: displayName } }) });
+  if (!Array.isArray(teamIds) || teamIds.length > 20 || teamIds.some((id) => typeof id !== "string" || !uuid.test(id)) || new Set(teamIds).size !== teamIds.length) throw new UpstreamError("Equipes inválidas", 400);
+  if (teamIds.length) {
+    const available = await agentRest("panel_teams", { params: { select: "id", active: "eq.true" } });
+    const activeIds = new Set((available as any[]).map((team) => team.id));
+    if (teamIds.some((id) => !activeIds.has(id))) throw new UpstreamError("Uma equipe selecionada não está disponível", 409);
+  }
+  const invited = await authRequest(invitePath(req), { method: "POST", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` }, body: JSON.stringify({ email, data: { display_name: displayName } }) });
   const userId = invited?.id ?? invited?.user?.id;
   if (!userId || !uuid.test(userId)) throw new UpstreamError("Convite criado, mas o usuário não foi identificado. Confira no Supabase Auth.", 502);
   const rows = await agentRest("panel_operators", { method: "POST", params: { on_conflict: "user_id", select: "user_id,display_name,role,active" }, body: { user_id: userId, display_name: displayName, role, active: true }, headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
-  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_invited", details: { user_id: userId, role } } });
+  if (teamIds.length) await agentRest("panel_team_members", { method: "POST", params: { on_conflict: "team_id,user_id" }, body: teamIds.map((teamId) => ({ team_id: teamId, user_id: userId, active: true })), headers: { Prefer: "resolution=merge-duplicates" } });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_invited", details: { user_id: userId, role, team_ids: teamIds } } });
   res.status(201).json({ operator: rows?.[0], invitationSent: true });
+});
+router.post("/operators/:id/resend-invite", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const id = safeId(String(req.params.id));
+  const operators = await agentRest("panel_operators", { params: { select: "user_id,active", user_id: `eq.${id}`, limit: "1" } });
+  if (!operators?.[0]?.active) throw new UpstreamError("Usuário não encontrado ou removido", 404);
+  const user = await authRequest(`admin/users/${id}`, { headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` } });
+  if (!user?.email) throw new UpstreamError("E-mail do usuário não encontrado", 404);
+  if (user.email_confirmed_at) throw new UpstreamError("Este usuário já confirmou o e-mail", 409);
+  const invited = await authRequest(invitePath(req), { method: "POST", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` }, body: JSON.stringify({ email: user.email }) });
+  if ((invited?.id ?? invited?.user?.id) !== id) throw new UpstreamError("O convite foi enviado para outra conta. Confira o usuário no Supabase Auth.", 502);
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_invite_resent", details: { user_id: id } } });
+  res.json({ sent: true });
+});
+router.delete("/operators/:id", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const id = safeId(String(req.params.id));
+  if (id === req.operator!.user_id) throw new UpstreamError("Você não pode remover sua própria conta", 409);
+  const operators = await agentRest("panel_operators", { params: { select: "user_id,display_name,active", user_id: `eq.${id}`, limit: "1" } });
+  const operator = operators?.[0];
+  if (!operator?.active) throw new UpstreamError("Usuário não encontrado ou já removido", 404);
+  const handoffs = await agentRest("human_handoffs", { params: { select: "id", assigned_to: `eq.${operator.display_name}`, resolved_at: "is.null", status: "in.(requested,pending,accepted,active,em_atendimento,in_progress)", limit: "1" } });
+  if (handoffs.length) throw new UpstreamError("Transfira os atendimentos ativos deste usuário antes de removê-lo", 409);
+  const rows = await agentRest("panel_operators", { method: "PATCH", params: { user_id: `eq.${id}`, active: "eq.true", select: "user_id" }, body: { active: false }, headers: { Prefer: "return=representation" } });
+  if (!rows?.length) throw new UpstreamError("Usuário não encontrado", 404);
+  await agentRest("panel_team_members", { method: "PATCH", params: { user_id: `eq.${id}` }, body: { active: false } });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_removed", details: { user_id: id } } });
+  res.json({ removed: true, historyPreserved: true });
 });
 router.patch("/operators/:id", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);
@@ -290,6 +349,12 @@ router.patch("/operators/:id", async (req: AuthRequest, res) => {
   if (req.body?.displayName !== undefined) {
     const name = String(req.body.displayName).trim();
     if (!name || name.length > 80) throw new UpstreamError("Nome inválido", 400);
+    const previous = await agentRest("panel_operators", { params: { select: "display_name", user_id: `eq.${id}`, limit: "1" } });
+    if (!previous?.[0]) throw new UpstreamError("Usuário não encontrado", 404);
+    if (name !== previous[0].display_name) {
+      const handoffs = await agentRest("human_handoffs", { params: { select: "id", assigned_to: `eq.${previous[0].display_name}`, resolved_at: "is.null", status: "in.(requested,pending,accepted,active,em_atendimento,in_progress)", limit: "1" } });
+      if (handoffs.length) throw new UpstreamError("Transfira os atendimentos ativos deste usuário antes de alterar o nome", 409);
+    }
     changes.display_name = name;
   }
   if (req.body?.role !== undefined) {
@@ -417,9 +482,9 @@ router.get("/conversations", async (req: AuthRequest, res) => {
   for (const item of tagLinks as any[]) tagsByContact.set(item.contact_id, [...(tagsByContact.get(item.contact_id) ?? []), tagById.get(item.tag_id)].filter(Boolean));
   const channelBySession = new Map<string, string>();
   for (const item of recentMessages as any[]) if (!channelBySession.has(item.session_id) && typeof item.metadata?.instance === "string") channelBySession.set(item.session_id, item.metadata.instance);
-  const answeredByEva = new Set((recentMessages as any[]).filter((item) => item.direction === "outbound" && item.sender_type === "ai").map((item) => item.session_id));
+  const answeredByLIA = new Set((recentMessages as any[]).filter((item) => item.direction === "outbound" && item.sender_type === "ai").map((item) => item.session_id));
   const teamIds = await teamIdsFor(req.operator!);
-  res.json({ conversations: sessions.filter((session) => visibleTo(req.operator!, session, handoffBySession.get(session.id), teamIds)).map((session) => ({ ...session, initial_new: !answeredByEva.has(session.id), channel: channelBySession.get(session.id) ?? config.instance(), contact: contactById.get(session.contact_id) ?? null, handoff: handoffBySession.get(session.id) ?? null, tags: tagsByContact.get(session.contact_id) ?? [] })) });
+  res.json({ conversations: sessions.filter((session) => visibleTo(req.operator!, session, handoffBySession.get(session.id), teamIds)).map((session) => ({ ...session, initial_new: !answeredByLIA.has(session.id), channel: channelBySession.get(session.id) ?? config.instance(), contact: contactById.get(session.contact_id) ?? null, handoff: handoffBySession.get(session.id) ?? null, tags: tagsByContact.get(session.contact_id) ?? [] })) });
 });
 
 router.post("/conversations/:id/route", async (req: AuthRequest, res) => {
@@ -429,12 +494,12 @@ router.post("/conversations/:id/route", async (req: AuthRequest, res) => {
   if (!["new", "operator", "eva", "team"].includes(target) || (target === "operator") !== Boolean(targetUserId) || (target === "team") !== Boolean(teamId)) throw new UpstreamError("Destino inválido", 400);
   const session = await sessionFor(req, String(req.params.id));
   if (target === "eva") {
-    if (!session.channel_id || !session.assigned_team_id) throw new UpstreamError("Defina a equipe responsável antes de ativar a Eva", 409);
+    if (!session.channel_id || !session.assigned_team_id) throw new UpstreamError("Defina a equipe responsável antes de ativar a LIA", 409);
     const [channels, teams] = await Promise.all([
       agentRest("panel_channels", { params: { select: "id", id: `eq.${session.channel_id}`, default_team_id: `eq.${session.assigned_team_id}`, ai_enabled: "eq.true", active: "eq.true", limit: "1" } }),
       agentRest("panel_teams", { params: { select: "id", id: `eq.${session.assigned_team_id}`, ai_enabled: "eq.true", active: "eq.true", limit: "1" } }),
     ]);
-    if (!channels.length || !teams.length) throw new UpstreamError("Ative a Eva na equipe e no canal antes de transferir esta conversa", 409);
+    if (!channels.length || !teams.length) throw new UpstreamError("Ative a LIA na equipe e no canal antes de transferir esta conversa", 409);
   }
   const result = target === "team"
     ? await agentRpc("panel_route_to_team", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_team_id: teamId })
@@ -546,7 +611,7 @@ router.post("/conversations/:id/assist", async (req: AuthRequest, res) => {
   const key = process.env.OPENAI_API_KEY?.trim();
   if (!key) throw new UpstreamError("Configure OPENAI_API_KEY no servidor para usar a assistência", 503);
   const rows = await agentRest("chat_messages", { params: { select: "sender_type,direction,normalized_content,content,created_at", session_id: `eq.${session.id}`, order: "created_at.desc", limit: "16" } });
-  const history = (rows as any[]).reverse().map((row) => `${row.direction === 'inbound' ? 'Cliente' : row.sender_type === 'human' ? 'Atendente' : 'Eva'}: ${String(row.normalized_content || row.content || '').slice(0, 800)}`).join("\n");
+  const history = (rows as any[]).reverse().map((row) => `${row.direction === 'inbound' ? 'Cliente' : row.sender_type === 'human' ? 'Atendente' : 'LIA'}: ${String(row.normalized_content || row.content || '').slice(0, 800)}`).join("\n");
   const instructions = mode === "suggest"
     ? "Sugira uma resposta curta em português brasileiro para o atendente imobiliário. Avance o atendimento sem repetir perguntas já respondidas. Não invente imóveis, preços, disponibilidade nem promessas. Use no máximo dois blocos curtos. Retorne apenas o texto sugerido."
     : "Aprimore apenas o rascunho do atendente em português brasileiro: corrija ortografia e clareza, preserve fatos, intenção e tom natural. Não invente informações, preços ou promessas. Retorne apenas o texto revisado.";
@@ -695,9 +760,9 @@ router.patch("/channels/:id", async (req: AuthRequest, res) => {
   const defaultTeamId = req.body?.defaultTeamId ? safeId(String(req.body.defaultTeamId)) : null;
   if (!displayName || displayName.length > 80 || purpose.length > 500 || instructions.length > 4000 || typeof req.body?.aiEnabled !== "boolean" || typeof req.body?.active !== "boolean") throw new UpstreamError("Configuração de canal inválida", 400);
   if (req.body.aiEnabled) {
-    if (!defaultTeamId) throw new UpstreamError("Escolha uma equipe com a Eva ativada", 400);
+    if (!defaultTeamId) throw new UpstreamError("Escolha uma equipe com a LIA ativada", 400);
     const teams = await agentRest("panel_teams", { params: { select: "id", id: `eq.${defaultTeamId}`, active: "eq.true", ai_enabled: "eq.true", limit: "1" } });
-    if (!teams.length) throw new UpstreamError("Ative a Eva na equipe antes de ativá-la neste canal", 409);
+    if (!teams.length) throw new UpstreamError("Ative a LIA na equipe antes de ativá-la neste canal", 409);
   }
   const channel = await agentRpc("panel_update_channel", { p_channel_id: id, p_operator_id: req.operator!.user_id, p_display_name: displayName, p_purpose: purpose, p_instructions: instructions, p_default_team_id: defaultTeamId, p_ai_enabled: req.body.aiEnabled, p_active: req.body.active });
   res.json({ channel });

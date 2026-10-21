@@ -33,7 +33,7 @@ export const inboxCategory = (session: SessionRow, operator: Operator): 'new' | 
   if (owner) return owner === operator.display_name ? 'mine' : 'others';
   return session.metadata?.panel_queue === 'new' || session.initial_new ? 'new' : 'others';
 };
-export const stateOf = (session: SessionRow) => session.closed_at || session.status === 'encerrado' ? 'Encerrada' : session.ai_enabled ? 'Eva ativa' : session.handoff?.status === 'accepted' || session.handoff?.status === 'active' || session.handoff?.status === 'em_atendimento' ? 'Humano assumiu' : 'Aguardando atendimento';
+export const stateOf = (session: SessionRow) => session.closed_at || session.status === 'encerrado' ? 'Encerrada' : session.ai_enabled ? 'LIA ativa' : session.handoff?.status === 'accepted' || session.handoff?.status === 'active' || session.handoff?.status === 'em_atendimento' ? 'Humano assumiu' : 'Aguardando atendimento';
 export const dateTime = (value?: string) => value ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Sao_Paulo' }).format(new Date(value)) : '—';
 export const money = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : 'Valor sob consulta';
 export const rentalPriceLabel = (property: PropertyRow) => {

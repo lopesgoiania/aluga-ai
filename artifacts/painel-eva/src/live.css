@@ -144,7 +144,27 @@ button.live-row { cursor:pointer; }.live-row>span:first-of-type { flex:1; min-wi
 .live-operations-stack { display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:18px; align-items:start; }
 .live-operations-form { display:flex; flex-wrap:wrap; gap:9px; margin:15px 0; }
 .live-operations-form input,.live-operations-form select,.live-internal-chat>select { min-height:40px; min-width:170px; flex:1; padding:9px; border:1px solid #cedce7; border-radius:8px; background:#fff; color:#203447; font:inherit; }
+.live-invite-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; padding:16px; border:1px solid #dce6ef; border-radius:12px; background:#f8fbfe; }
+.live-invite-form>label { display:grid; gap:5px; color:#526b80; font-size:12px; }
+.live-invite-form>label input,.live-invite-form>label select { width:100%; min-width:0; }
+.live-invite-form fieldset { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:8px 16px; margin:0; padding:10px 12px; border:1px solid #dce6ef; border-radius:9px; }
+.live-invite-form legend { padding:0 4px; color:#526b80; font-size:12px; }
+.live-invite-form fieldset label,.live-user-toggle { display:inline-flex; align-items:center; gap:7px; color:#344b60; font-size:12px; }
+.live-invite-form input[type=checkbox],.live-user-toggle input { width:16px; height:16px; min-width:16px; min-height:16px; flex:none; padding:0; accent-color:#1268b5; }
+.live-invite-form>button { grid-column:1/-1; justify-self:start; }
+.live-user-list { margin-top:18px; }
+.live-user-list>.live-row { gap:16px; }
+.live-user-entry { padding:11px 0; border-top:1px solid #e2eaf1; }
+.live-user-entry .live-row { gap:16px; }
+.live-user-entry .live-row span { min-width:0; }
+.live-user-entry .live-row small { overflow-wrap:anywhere; }
+.live-user-entry .live-team-edit { margin-top:10px; }
+@media (max-width:640px) { .live-invite-form { grid-template-columns:1fr; } .live-invite-form>button { width:100%; } .live-user-entry .live-row { align-items:flex-start; flex-direction:column; } }
 .live-team { padding:14px 0; border-top:1px solid #e8eef3; }
+.live-team-actions { display:flex; flex-wrap:wrap; gap:7px; }
+.live-team-edit { display:grid; gap:10px; padding:12px; border-radius:9px; background:#f3f8fc; }
+.live-team-edit label { display:grid; gap:5px; color:#526b80; font-size:12px; }
+.live-team-edit input:not([type=checkbox]),.live-team-edit select { width:100%; min-height:38px; padding:8px; border:1px solid #cedce7; border-radius:8px; background:#fff; color:#203447; font:inherit; }
 .live-team-members { display:flex; flex-wrap:wrap; gap:9px 16px; margin-top:10px; }
 .live-team-members label { display:flex; align-items:center; gap:5px; font-size:12px; }
 .live-internal-chat { max-width:840px; }
