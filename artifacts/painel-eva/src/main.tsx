@@ -6,7 +6,7 @@ import './index.css';
 import './utility.css';
 import './interaction.css';
 
-import App from './App';
+import App from './LiveApp';
 
 createRoot(document.getElementById('root')!, {
   // Keeps caught errors off reportError(), which would raise the dev overlay.

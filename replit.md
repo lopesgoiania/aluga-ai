@@ -1,45 +1,12 @@
-# [Project name]
+# Painel Eva — Lopes Aluga
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Workspace React/Vite + Express do painel operacional. O frontend não contém dados de demonstração. Todas as consultas e ações passam pela API do servidor, que exige autenticação de operador e usa as credenciais do `aluga-ai`, `Buscaimóveis` e Evolution somente no servidor.
 
-## Run & Operate
+## Executar
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+1. Configure a migração `../sql/14-painel-eva.sql` no Supabase `aluga-ai` e cadastre um usuário em `panel_operators`.
+2. Copie `artifacts/api-server/.env.example` para `artifacts/api-server/.env` e preencha as variáveis.
+3. Execute `pnpm install` e, em terminais separados, `pnpm --filter @workspace/api-server run dev` e `pnpm --filter @workspace/painel-eva run dev`.
+4. Abra `http://localhost:5173`. Execute `pnpm run build` para verificar o workspace.
 
-## Stack
-
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
-
-## Where things live
-
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
-
-## Architecture decisions
-
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
-
-## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+Sem credenciais, a tela informa o que falta e não apresenta informações falsas. O detalhamento técnico e os limites atuais estão em `artifacts/painel-eva/README.md` e `../documentacao/painel-eva-integracao.md`.

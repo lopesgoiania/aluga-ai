@@ -1,61 +1,38 @@
-# Painel Eva — demonstração local
+# Painel Eva — integração operacional
 
-Console operacional fictício em português brasileiro para a equipe Lopes Aluga. A interface foi criada como protótipo frontend; nenhum atendimento, conexão ou indicador deste projeto representa operação real.
+O frontend não contém dados fictícios. Ele carrega conversas, handoffs, etiquetas, falhas do agente e catálogo via API autenticada; o servidor consulta os dois projetos Supabase e a Evolution. Sem configuração, a interface mostra as variáveis ausentes.
 
-## Executar
+## Preparação
 
-Na raiz do workspace:
+1. Execute `../../../sql/14-painel-eva.sql`, `../../../sql/15-filas-assinaturas-painel.sql` e `../../../sql/16-etiquetas-personalizaveis.sql`, nessa ordem, **somente** no Supabase `aluga-ai`. As três migrações foram aplicadas no ambiente atual em 05/10/2026.
+2. Crie um usuário em Supabase Auth no projeto `aluga-ai` e registre o `user_id` em `public.panel_operators`, com papel `admin`, `supervisor` ou `attendant`.
+3. Copie `../api-server/.env.example` para `../api-server/.env` e preencha as variáveis no Mac ou no servidor. Esse arquivo é ignorado pelo Git. Nunca use `VITE_` para chaves privilegiadas.
+4. Na raiz do workspace, execute `pnpm install`, `pnpm --filter @workspace/api-server run dev` e, em outro terminal, `pnpm --filter @workspace/painel-eva run dev`.
+5. Abra `http://localhost:5173` e faça login com o operador autorizado. `pnpm run build` verifica todos os pacotes.
 
-```sh
-cd artifacts/painel-eva
-pnpm install
-pnpm dev
-```
+A API local usa a porta 5050 porque a porta 5000 costuma estar ocupada pelo macOS. A aplicação usa o proxy do Vite em desenvolvimento; em produção, sirva `/api` e a aplicação web na mesma origem HTTPS.
 
-Produção local: `pnpm build` e `pnpm serve`.
+## Publicação na Vercel
 
-## Rotas
+O repositório é um monorepo. Crie o projeto Vercel apontando para a **raiz do repositório**, sem selecionar `artifacts/painel-eva` como Root Directory. O `vercel.json` da raiz compila o painel e encaminha `/api/*` à função Express, mantendo login, cookies e interface no mesmo domínio. A Vercel precisa instalar as dependências com pnpm e usar Node.js 22 ou superior.
 
-| Rota | Módulo |
-| --- | --- |
-| `/` | Visão geral operacional |
-| `/atendimentos` | Caixa de entrada: lista, mensagens e contexto |
-| `/fila-humana` | Chamados aguardando e assumidos |
-| `/leads` | CRM em quadro Kanban ou tabela |
-| `/imoveis` | Catálogo ilustrativo com busca e filtros |
-| `/alertas` | Incidentes, detalhe e linha do tempo |
-| `/conexao` | Estado ilustrativo da instância e QR não funcional |
-| `/relatorios` | Indicadores operacionais de exemplo |
-| `/equipe` | Papéis e carga de atendimento |
-| `/configuracoes` | Horários, prazo e regras de fila |
+Configure como variáveis de ambiente **somente no servidor** os nomes de `artifacts/api-server/.env.example`: `SUPABASE_AGENT_URL`, `SUPABASE_AGENT_ANON_KEY`, `SUPABASE_AGENT_SERVICE_ROLE_KEY`, `SUPABASE_CATALOG_URL`, `SUPABASE_CATALOG_SERVICE_ROLE_KEY`, `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE`, `OPENAI_API_KEY` e, se desejar, `OPENAI_ASSIST_MODEL`. Não configure essas chaves com prefixo `VITE_` e não as envie ao GitHub. `API_PORT` e `PANEL_HOST` são exclusivos do servidor local. `PANEL_ORIGIN` não é necessário quando a interface e a API usam o mesmo domínio.
 
-## Organização de dados e integração futura
+Depois da publicação, abra `/api/healthz` e `/api/setup` no domínio da implantação. `setup` deve mostrar `configured: true`. Entre com um operador autorizado, confira a lista de conversas e o catálogo e, num número de teste, valide uma mensagem de saída. A API usa a Evolution e os projetos Supabase já existentes; publicar o painel não altera os webhooks da Eva no n8n.
 
-- `src/mocks/data.ts` contém os contatos, mensagens, imóveis, operadores e incidentes fictícios.
-- `src/services/contracts.ts` define contratos TypeScript para `Conversation`/`Contact`, `Message`, `Incident`, `Property`, `Operator` e operações de atendimento.
-- `src/services/demo-service.ts` implementa as operações de exemplo com atraso local breve. Substitua este adaptador por clients tipados no futuro; o restante da interface deve chamar apenas a camada de serviço.
-- `src/App.tsx` reúne estado local de demonstração, navegação e módulos; `src/index.css` e `src/utility.css` guardam tokens, elementos compartilhados e comportamento responsivo.
+## Estado das integrações
 
-Pontos de integração planejados:
+- `aluga-ai`: leitura de `chat_sessions`, `contacts`, `chat_messages`, `human_handoffs`, `tags`, `contact_tags`, `property_interests` e falhas de `agent_events`. Ações de assumir, devolver, encerrar e reservar/confirmar envio passam por funções SQL transacionais.
+- `Buscaimóveis`: leitura de `public.properties` em projeto separado. A tela mostra até 200 registros por consulta e permite busca local nesses resultados; paginação e busca no catálogo completo ainda devem ser implementadas.
+- Evolution: lista de instâncias, foto do contato, QR para administrador, criação de nova instância com o webhook de entrada existente, recuperação de mídias e envio de texto, áudio, imagens, documentos e figurinhas WebP pelo canal de origem da conversa. Um envio sem confirmação fica marcado como incerto; o painel não o repete automaticamente.
+- Atendimento: histórico com rolagem independente, prévia de imagens, reprodução de áudios, download de documentos, transcrição recebida pelo fluxo n8n, editor de contato e campos personalizados. O compositor oferece anexos, figurinhas, gravação com contador e medidor visual, prévia do áudio e ações de IA em ícones. Sugestão e revisão de respostas exigem `OPENAI_API_KEY` no servidor e sempre entram como rascunho para revisão humana.
+- Atribuição: uma conversa em atendimento humano só pode ser respondida pelo operador atribuído. Administradores e supervisores podem usar **Assumir neste painel** para transferir uma atribuição externa (por exemplo, `WhatsApp`) para si; a troca fica registrada em `panel_audit_log`. Se houver envio pendente ou incerto, a transferência é bloqueada até a conferência.
+- Filas: **Novos** contém conversas sem responsável que ainda não receberam resposta da Eva e as conversas devolvidas explicitamente à fila; **Meus** contém conversas atribuídas ao usuário logado; **Outros** contém as demais, inclusive as conduzidas pela Eva após a primeira resposta. Transferir para Novos pausa a Eva; transferir para um atendente atribui responsabilidade; transferir para Eva resolve a transferência humana e retoma a IA. O banco executa essas mudanças em uma transação.
+- Assinaturas: cada operador define a sua em Configurações. Mensagens de texto enviadas pelo painel recebem `*Nome:*` na primeira linha para que o WhatsApp exiba o nome em negrito. A assinatura da Eva foi publicada no workflow existente de persistência e envio em 05/10/2026; o JSON local `../../../workflows-n8n/06-persistencia-envio.json` acompanha essa versão.
+- Etiquetas: em Configurações é possível criar, renomear, alterar a cor e desativar qualquer etiqueta, inclusive as padrão. O slug interno permanece estável para as automações. A remoção preserva o histórico e tira a etiqueta dos contatos e filtros. Na conversa, cada etiqueta pode ser adicionada ou removida; uma remoção manual prevalece sobre as regras automáticas até que alguém a adicione novamente.
+- A sidebar pode ser recolhida e a escolha permanece no navegador. Em Atendimentos, o cabeçalho descritivo foi removido para ampliar a área do chat.
+- Login: Supabase Auth do projeto `aluga-ai`. O servidor valida o usuário e busca o papel em `panel_operators`. Tokens são guardados em cookies HTTP-only.
 
-1. Conversation/contact/message: criar client de API para consultar `contacts`, `chat_sessions` e `chat_messages`, carregamento incremental, estado real do canal e atualizações em tempo real.
-2. Assumir, responder e devolver à Eva: conectar os métodos do `DemoServices` aos endpoints autorizados de handoff. Confirmar pause/resume no servidor; uma resposta enviada não deve ser mostrada como entregue sem confirmação.
-3. Fila: conectar ações de aceite, atribuição e distribuição a endpoints que validem papel e concorrência.
-4. Alertas: carregar `agent_events` e incidentes persistidos, anexar tentativas/execução e reconhecer no servidor. Reprocessamento exige política segura e idempotência.
-5. Imóveis: buscar o catálogo por API própria e confirmar a disponibilidade antes de exibir como vigente.
-6. Equipe/configurações/relatórios: carregar dados autorizados; manter chaves e credenciais apenas no servidor.
+## Limites atuais
 
-Nenhuma dessas integrações está ativa. Esta entrega não acessa Supabase, Evolution API, n8n, WhatsApp nem qualquer API externa. Não há persistência: atualizações são mantidas apenas no estado React durante a sessão e recarregar a página restaura os mocks. QR code é um padrão visual sem credencial. Papéis são referências visuais, não autenticação ou autorização.
-
-## Interações incluídas
-
-- Fluxo da conversa: Eva ativa → assumir e pausar Eva → resposta humana local → devolver e retomar Eva. O fluxo principal está em `Atendimentos`.
-- Filtros de conversas/estado, busca local, navegação para contexto e alternância lista/conversa/contexto em viewport móvel.
-- Fila: aceitar chamado e distribuição visual de demonstração.
-- Alertas: selecionar incidente, examinar timeline e reconhecer com um novo evento local.
-- CRM: alternar Kanban/tabela, filtrar estágio e mover oportunidade localmente.
-- Imóveis, conexão, relatórios, equipe e configurações têm controles com feedback claro de demonstração.
-
-## Direção visual
-
-Layout de console operacional em três regiões, com azul operacional, violeta para a Eva, superfícies azul-acinzentadas e tipografia local sem carregamento externo. Métricas usam uma pilha monoespaçada; status e estados têm rótulo textual além da cor. Navegação mobile troca a lista, a conversa e o contexto por painéis.
+Mídias antigas dependem de ainda estarem disponíveis na Evolution/WhatsApp. Para retenção durável, o fluxo de entrada precisa gravar os arquivos em Supabase Storage ao recebê-los. O editor mostra a transcrição já criada pelo n8n, mas mensagens anteriores sem `normalized_content` não têm transcrição retroativa. Os alertas exibem falhas reais de `agent_events`, mas não substituem uma camada persistente de incidentes. As métricas vêm das 100 sessões mais recentes; o catálogo mostra até 200 imóveis. Ainda faltam distribuição de fila, busca global no banco e atualização por Supabase Realtime. Valide o envio de áudio, anexos, figurinhas e o QR de uma nova instância em um número de teste antes de usar com clientes.
