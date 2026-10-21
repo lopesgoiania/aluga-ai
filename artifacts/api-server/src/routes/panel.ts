@@ -308,7 +308,7 @@ router.patch("/operators/:id", async (req: AuthRequest, res) => {
 });
 router.get("/teams", async (_req, res) => {
   const [teams, members] = await Promise.all([
-    agentRest("panel_teams", { params: { select: "id,name,description,active,created_at", order: "name.asc" } }),
+    agentRest("panel_teams", { params: { select: "id,name,description,ai_enabled,active,created_at", order: "name.asc" } }),
     agentRest("panel_team_members", { params: { select: "team_id,user_id,active" } }),
   ]);
   res.json({ teams, members });
@@ -318,8 +318,33 @@ router.post("/teams", async (req: AuthRequest, res) => {
   const name = String(req.body?.name ?? "").trim();
   const description = String(req.body?.description ?? "").trim();
   if (!name || name.length > 80 || description.length > 500) throw new UpstreamError("Nome ou descrição inválidos", 400);
-  const rows = await agentRest("panel_teams", { method: "POST", params: { select: "*" }, body: { name, description, active: true }, headers: { Prefer: "return=representation" } });
+  const rows = await agentRest("panel_teams", { method: "POST", params: { select: "*" }, body: { name, description, ai_enabled: false, active: true }, headers: { Prefer: "return=representation" } });
   res.status(201).json({ team: rows[0] });
+});
+router.patch("/teams/:id", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  const id = safeId(String(req.params.id));
+  const name = String(req.body?.name ?? "").trim();
+  const description = String(req.body?.description ?? "").trim();
+  const aiEnabled = req.body?.aiEnabled;
+  if (!name || name.length > 80 || description.length > 500 || typeof aiEnabled !== "boolean") throw new UpstreamError("Dados da equipe inválidos", 400);
+  const rows = await agentRest("panel_teams", { method: "PATCH", params: { id: `eq.${id}`, active: "eq.true", select: "*" }, body: { name, description, ai_enabled: aiEnabled }, headers: { Prefer: "return=representation" } });
+  if (!rows?.length) throw new UpstreamError("Equipe não encontrada", 404);
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "team_updated", details: { team_id: id, name, ai_enabled: aiEnabled } } });
+  res.json({ team: rows[0] });
+});
+router.delete("/teams/:id", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  const id = safeId(String(req.params.id));
+  const [channels, sessions] = await Promise.all([
+    agentRest("panel_channels", { params: { select: "id", default_team_id: `eq.${id}`, active: "eq.true", limit: "1" } }),
+    agentRest("chat_sessions", { params: { select: "id", assigned_team_id: `eq.${id}`, closed_at: "is.null", limit: "1" } }),
+  ]);
+  if (channels.length || sessions.length) throw new UpstreamError("Transfira as conversas abertas e altere os canais desta equipe antes de removê-la", 409);
+  const rows = await agentRest("panel_teams", { method: "PATCH", params: { id: `eq.${id}`, active: "eq.true", select: "id" }, body: { active: false, ai_enabled: false }, headers: { Prefer: "return=representation" } });
+  if (!rows?.length) throw new UpstreamError("Equipe não encontrada", 404);
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "team_archived", details: { team_id: id } } });
+  res.json({ archived: true });
 });
 router.put("/teams/:id/members/:userId", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin", "supervisor"]);
@@ -403,6 +428,14 @@ router.post("/conversations/:id/route", async (req: AuthRequest, res) => {
   const teamId = req.body?.teamId == null ? null : safeId(String(req.body.teamId));
   if (!["new", "operator", "eva", "team"].includes(target) || (target === "operator") !== Boolean(targetUserId) || (target === "team") !== Boolean(teamId)) throw new UpstreamError("Destino inválido", 400);
   const session = await sessionFor(req, String(req.params.id));
+  if (target === "eva") {
+    if (!session.channel_id || !session.assigned_team_id) throw new UpstreamError("Defina a equipe responsável antes de ativar a Eva", 409);
+    const [channels, teams] = await Promise.all([
+      agentRest("panel_channels", { params: { select: "id", id: `eq.${session.channel_id}`, default_team_id: `eq.${session.assigned_team_id}`, ai_enabled: "eq.true", active: "eq.true", limit: "1" } }),
+      agentRest("panel_teams", { params: { select: "id", id: `eq.${session.assigned_team_id}`, ai_enabled: "eq.true", active: "eq.true", limit: "1" } }),
+    ]);
+    if (!channels.length || !teams.length) throw new UpstreamError("Ative a Eva na equipe e no canal antes de transferir esta conversa", 409);
+  }
   const result = target === "team"
     ? await agentRpc("panel_route_to_team", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_team_id: teamId })
     : await agentRpc("panel_route_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_target: target, p_target_user_id: targetUserId });
@@ -661,6 +694,11 @@ router.patch("/channels/:id", async (req: AuthRequest, res) => {
   const instructions = String(req.body?.instructions ?? "").trim();
   const defaultTeamId = req.body?.defaultTeamId ? safeId(String(req.body.defaultTeamId)) : null;
   if (!displayName || displayName.length > 80 || purpose.length > 500 || instructions.length > 4000 || typeof req.body?.aiEnabled !== "boolean" || typeof req.body?.active !== "boolean") throw new UpstreamError("Configuração de canal inválida", 400);
+  if (req.body.aiEnabled) {
+    if (!defaultTeamId) throw new UpstreamError("Escolha uma equipe com a Eva ativada", 400);
+    const teams = await agentRest("panel_teams", { params: { select: "id", id: `eq.${defaultTeamId}`, active: "eq.true", ai_enabled: "eq.true", limit: "1" } });
+    if (!teams.length) throw new UpstreamError("Ative a Eva na equipe antes de ativá-la neste canal", 409);
+  }
   const channel = await agentRpc("panel_update_channel", { p_channel_id: id, p_operator_id: req.operator!.user_id, p_display_name: displayName, p_purpose: purpose, p_instructions: instructions, p_default_team_id: defaultTeamId, p_ai_enabled: req.body.aiEnabled, p_active: req.body.active });
   res.json({ channel });
 });
@@ -687,6 +725,16 @@ router.get("/connection/instances/:name/qr", async (req: AuthRequest, res) => {
   const rows = await evolution("/instance/fetchInstances");
   if (!Array.isArray(rows) || !rows.some((row: any) => row.name === name)) throw new UpstreamError("Instância não encontrada", 404);
   res.json({ instance: name, data: await evolution(`/instance/connect/${encodeURIComponent(name)}`) });
+});
+router.post("/connection/instances/:name/disconnect", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const name = String(req.params.name);
+  if (!/^[a-zA-Z0-9_-]{3,48}$/.test(name)) throw new UpstreamError("Instância inválida", 400);
+  const rows = await evolution("/instance/fetchInstances");
+  if (!Array.isArray(rows) || !rows.some((row: any) => row.name === name)) throw new UpstreamError("Instância não encontrada", 404);
+  const result = await evolution(`/instance/logout/${encodeURIComponent(name)}`, { method: "DELETE" }, 30000);
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "instance_disconnected", details: { instance: name } } });
+  res.json({ disconnected: true, result });
 });
 router.get("/connection/qr", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);

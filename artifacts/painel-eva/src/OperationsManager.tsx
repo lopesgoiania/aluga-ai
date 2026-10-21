@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { api, type Operator } from './services/api';
 
 type ManagedOperator = Operator & { active: boolean };
-type Team = { id: string; name: string; description?: string; active: boolean };
+type Team = { id: string; name: string; description?: string; ai_enabled: boolean; active: boolean };
 type Member = { team_id: string; user_id: string; active: boolean };
 type InternalMessage = { id: string; sender_user_id: string; body: string; created_at: string };
 
@@ -14,6 +14,8 @@ export function OperationsManager({ operator, flash }: { operator: Operator; fla
   const [name, setName] = useState('');
   const [role, setRole] = useState<Operator['role']>('attendant');
   const [teamName, setTeamName] = useState('');
+  const [editingTeam, setEditingTeam] = useState<string | null>(null);
+  const [teamDraft, setTeamDraft] = useState({ name: '', description: '', aiEnabled: false });
   const [busy, setBusy] = useState(false);
   const load = async () => {
     const [users, groups] = await Promise.all([api<{ operators: ManagedOperator[] }>('/operators/manage'), api<{ teams: Team[]; members: Member[] }>('/teams')]);
@@ -38,6 +40,19 @@ export function OperationsManager({ operator, flash }: { operator: Operator; fla
     catch (error) { flash(error instanceof Error ? error.message : 'Falha ao atualizar equipe'); }
     finally { setBusy(false); }
   }
+  async function saveTeam(event: FormEvent) {
+    event.preventDefault(); if (!editingTeam) return; setBusy(true);
+    try { await api(`/teams/${editingTeam}`, { method: 'PATCH', body: teamDraft }); await load(); setEditingTeam(null); flash('Equipe atualizada.'); }
+    catch (error) { flash(error instanceof Error ? error.message : 'Falha ao editar equipe'); }
+    finally { setBusy(false); }
+  }
+  async function removeTeam(team: Team) {
+    if (!window.confirm(`Remover a equipe ${team.name}? O histórico será preservado.`)) return;
+    setBusy(true);
+    try { await api(`/teams/${team.id}`, { method: 'DELETE' }); await load(); if (editingTeam === team.id) setEditingTeam(null); flash('Equipe removida da operação.'); }
+    catch (error) { flash(error instanceof Error ? error.message : 'Falha ao remover equipe'); }
+    finally { setBusy(false); }
+  }
   async function setActive(user: ManagedOperator) {
     setBusy(true);
     try { await api(`/operators/${user.user_id}`, { method: 'PATCH', body: { active: !user.active } }); await load(); }
@@ -45,7 +60,7 @@ export function OperationsManager({ operator, flash }: { operator: Operator; fla
     finally { setBusy(false); }
   }
   return <div className="live-operations-stack"><section className="live-card"><h2>Usuários</h2><p>Convide atendentes e defina quem pode entrar no painel.</p>{operator.role === 'admin' && <form className="live-operations-form" onSubmit={invite}><input aria-label="E-mail" type="email" required placeholder="E-mail" value={email} onChange={(e) => setEmail(e.target.value)} /><input aria-label="Nome" required placeholder="Nome do atendente" value={name} onChange={(e) => setName(e.target.value)} /><select aria-label="Função" value={role} onChange={(e) => setRole(e.target.value as Operator['role'])}><option value="attendant">Atendente</option><option value="supervisor">Supervisor</option><option value="admin">Administrador</option></select><button className="button button-primary" disabled={busy}>Enviar convite</button></form>}<div>{operators.map((user) => <div className="live-row" key={user.user_id}><span><b>{user.display_name}</b><small>{user.role} · {user.active ? 'Ativo' : 'Inativo'}</small></span>{operator.role === 'admin' && user.user_id !== operator.user_id && <button className="button button-outline" disabled={busy} onClick={() => void setActive(user)}>{user.active ? 'Desativar' : 'Ativar'}</button>}</div>)}</div></section>
-    <section className="live-card"><h2>Equipes</h2><p>Organize usuários por área. As regras de distribuição por canal são configuradas separadamente.</p><form className="live-operations-form" onSubmit={createTeam}><input aria-label="Nome da equipe" required maxLength={80} placeholder="Ex.: Comercial" value={teamName} onChange={(e) => setTeamName(e.target.value)} /><button className="button button-primary" disabled={busy}>Criar equipe</button></form>{teams.map((team) => <div key={team.id} className="live-team"><strong>{team.name}</strong><div className="live-team-members">{operators.filter((user) => user.active).map((user) => { const joined = members.some((member) => member.team_id === team.id && member.user_id === user.user_id && member.active); return <label key={user.user_id}><input type="checkbox" checked={joined} disabled={busy} onChange={() => void setMember(team.id, user.user_id, !joined)} />{user.display_name}</label>; })}</div></div>)}</section></div>;
+    <section className="live-card"><h2>Equipes</h2><p>Ative a Eva somente nas equipes desejadas. Quando ela não souber responder, o atendimento permanece na fila da equipe responsável.</p><form className="live-operations-form" onSubmit={createTeam}><input aria-label="Nome da equipe" required maxLength={80} placeholder="Ex.: Comercial" value={teamName} onChange={(e) => setTeamName(e.target.value)} /><button className="button button-primary" disabled={busy}>Criar equipe</button></form>{teams.filter((team) => team.active).map((team) => <div key={team.id} className="live-team"><div className="live-row"><span><strong>{team.name}</strong><small>{team.ai_enabled ? 'Eva habilitada nesta equipe' : 'Atendimento humano'}</small></span><div className="live-team-actions"><button type="button" className="button button-outline" disabled={busy} onClick={() => { setEditingTeam(team.id); setTeamDraft({ name: team.name, description: team.description || '', aiEnabled: team.ai_enabled }); }}>Editar</button><button type="button" className="button button-outline" disabled={busy} onClick={() => void removeTeam(team)}>Remover</button></div></div>{editingTeam === team.id && <form className="live-team-edit" onSubmit={saveTeam}><label>Nome<input value={teamDraft.name} onChange={(e) => setTeamDraft({ ...teamDraft, name: e.target.value })} required maxLength={80} /></label><label>Descrição<input value={teamDraft.description} onChange={(e) => setTeamDraft({ ...teamDraft, description: e.target.value })} maxLength={500} /></label><label><input type="checkbox" checked={teamDraft.aiEnabled} onChange={(e) => setTeamDraft({ ...teamDraft, aiEnabled: e.target.checked })} /> Eva pode atender nesta equipe</label><div className="live-team-actions"><button className="button button-primary" disabled={busy}>Salvar equipe</button><button type="button" className="button button-outline" onClick={() => setEditingTeam(null)}>Cancelar</button></div></form>}<div className="live-team-members">{operators.filter((user) => user.active).map((user) => { const joined = members.some((member) => member.team_id === team.id && member.user_id === user.user_id && member.active); return <label key={user.user_id}><input type="checkbox" checked={joined} disabled={busy} onChange={() => void setMember(team.id, user.user_id, !joined)} />{user.display_name}</label>; })}</div></div>)}</section></div>;
 }
 
 export function InternalChat({ operator, flash }: { operator: Operator; flash: (message: string) => void }) {

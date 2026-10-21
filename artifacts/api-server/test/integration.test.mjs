@@ -12,6 +12,7 @@ const attendantId = '55555555-5555-4555-8555-555555555555';
 const contactId = '33333333-3333-4333-8333-333333333333';
 const outboundId = '66666666-6666-4666-8666-666666666666';
 const mediaId = '88888888-8888-4888-8888-888888888888';
+const teamId = '99999999-9999-4999-8999-999999999999';
 
 const listen = (server) => new Promise((resolvePort) => server.listen(0, '127.0.0.1', () => resolvePort(server.address().port)));
 const close = (server) => new Promise((resolveClose) => server.close(resolveClose));
@@ -23,6 +24,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let sentText = '';
   let routedTarget = '';
   let archiveReady = false;
+  let disconnected = false;
   const reservations = new Set();
   const upstream = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://local');
@@ -56,6 +58,11 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     }
     if (url.pathname === '/rest/v1/chat_media_archive') return json(archiveReady ? [{ storage_path: 'Teste/AUDIO-1', mime_type: 'audio/ogg', size_bytes: 14 }] : []);
     if (url.pathname === '/rest/v1/panel_channels') return json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', instance_name: 'Teste', display_name: 'Teste', ai_enabled: true, active: true }]);
+    if (url.pathname === '/rest/v1/panel_teams') {
+      if (req.method === 'PATCH') return json([{ id: teamId, name: 'Comercial', ai_enabled: true, active: true }]);
+      return json([{ id: teamId, name: 'Comercial', ai_enabled: false, active: true }]);
+    }
+    if (url.pathname === '/rest/v1/panel_team_members') return json([]);
     if (url.pathname === '/storage/v1/object/authenticated/eva-media/Teste/AUDIO-1') { res.writeHead(200, { 'Content-Type': 'audio/ogg' }); res.end('archived-media'); return; }
     if (url.pathname === '/rest/v1/panel_audit_log') return json({});
     if (url.pathname === '/rest/v1/property_interests') return json([]);
@@ -64,6 +71,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/rest/v1/properties') return json([{ source_property_id: 'R-1', title: 'Galpão', city: 'Goiânia', area: 200 }]);
     if (url.pathname === '/instance/connectionState/Teste') return json({ instance: { state: 'open' } });
     if (url.pathname === '/instance/fetchInstances') return json([{ name: 'Teste', connectionStatus: 'open', ownerJid: '5562999999999@s.whatsapp.net' }]);
+    if (url.pathname === '/instance/logout/Teste' && req.method === 'DELETE') { disconnected = true; return json({ status: 'SUCCESS' }); }
     if (url.pathname === '/chat/fetchProfilePictureUrl/Teste') return json({ profilePictureUrl: 'https://example.test/avatar.jpg' });
     if (url.pathname === '/chat/findMessages/Teste') return json({ messages: { records: [{ key: { id: 'AUDIO-1' } }] } });
     if (url.pathname === '/chat/getBase64FromMediaMessage/Teste') return json({ mimetype: 'audio/ogg', base64: Buffer.from('media').toString('base64') });
@@ -125,6 +133,13 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(archivedMedia.status, 200);
     assert.equal(await archivedMedia.text(), 'archived-media');
     assert.equal((await (await get('/connection/instances')).json()).instances[0].name, 'Teste');
+    const updateTeam = await fetch(`${base}/teams/${teamId}`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Comercial', description: 'Locação', aiEnabled: true }) });
+    assert.equal((await updateTeam.json()).team.ai_enabled, true);
+    const removeTeam = await fetch(`${base}/teams/${teamId}`, { method: 'DELETE', headers: { Cookie: cookie } });
+    assert.equal(removeTeam.status, 409, 'Equipe com conversas abertas não pode ser removida');
+    const disconnect = await fetch(`${base}/connection/instances/Teste/disconnect`, { method: 'POST', headers: { Cookie: cookie } });
+    assert.equal((await disconnect.json()).disconnected, true);
+    assert.equal(disconnected, true);
     const edit = await fetch(`${base}/conversations/${sessionId}/contact`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Cliente Teste', email: 'teste@example.test', notes: 'Importante', fields: { Preferencia: 'Galpão' } }) });
     assert.equal(edit.status, 200);
     const catalog = await (await get('/properties')).json();
@@ -145,6 +160,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     const transfer = await fetch(`${base}/conversations/${sessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'operator', targetUserId: attendantId }) });
     assert.equal((await transfer.json()).target, 'operator');
     assert.equal(routedTarget, 'operator');
+    const evaWithoutTeam = await fetch(`${base}/conversations/${sessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'eva' }) });
+    assert.equal(evaWithoutTeam.status, 409, 'Eva só pode receber atendimento de uma equipe configurada');
     const audio = await fetch(`${base}/conversations/${sessionId}/audio`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ requestKey: '99999999-9999-4999-8999-999999999999', mimeType: 'audio/ogg', base64: Buffer.from('recording').toString('base64') }) });
     assert.equal((await audio.json()).status, 'sent');
     assert.equal(sends, 2);

@@ -1,17 +1,17 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "buildCommand": "pnpm --filter @workspace/painel-eva build",
+  "buildCommand": "pnpm --filter @workspace/api-server build && pnpm --filter @workspace/painel-eva build",
   "outputDirectory": "artifacts/painel-eva/dist/public",
   "functions": {
-    "api/index.ts": {
+    "api/index.js": {
       "maxDuration": 60
     }
   },
   "rewrites": [
     {
-      "source": "/api/:path*",
-      "destination": "/api/index?__eva_path=:path*"
+      "source": "/api/(.*)",
+      "destination": "/api/index?__eva_path=$1"
     },
     {
       "source": "/(.*)",

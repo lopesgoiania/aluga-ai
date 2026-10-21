@@ -5,7 +5,7 @@ import { api, type Operator } from './services/api';
 
 type Instance = { name: string; state: string; profileName?: string; number?: string };
 type Channel = { id: string; instance_name: string; display_name: string; purpose?: string | null; instructions?: string | null; default_team_id?: string | null; ai_enabled: boolean; active: boolean };
-type Team = { id: string; name: string; active: boolean };
+type Team = { id: string; name: string; active: boolean; ai_enabled: boolean };
 
 export default function ConnectionManager({ operator, flash }: { operator: Operator; flash: (message: string) => void }) {
   const [instances, setInstances] = useState<Instance[]>([]);
@@ -57,6 +57,15 @@ export default function ConnectionManager({ operator, flash }: { operator: Opera
     catch (issue) { flash(issue instanceof Error ? issue.message : 'Falha ao salvar canal'); }
     finally { setBusy(false); }
   }
+  async function disconnect() {
+    if (!selected || !window.confirm(`Desconectar o WhatsApp da instância ${selected}? O canal e o histórico permanecem salvos; será preciso ler um novo QR Code para conectar outro número.`)) return;
+    setBusy(true);
+    try {
+      await api(`/connection/instances/${encodeURIComponent(selected)}/disconnect`, { method: 'POST' });
+      setQr(''); await load(); flash('WhatsApp desconectado. Use o QR Code para conectar outro número.');
+    } catch (issue) { flash(issue instanceof Error ? issue.message : 'Falha ao desconectar instância'); }
+    finally { setBusy(false); }
+  }
   const current = instances.find((item) => item.name === selected);
   const connected = ['open', 'connected'].includes(String(current?.state).toLowerCase());
   return <section className="live-card live-connection"><h2>Canais WhatsApp</h2><p>Selecione uma instância para conferir a conexão. As respostas de cada conversa saem pelo número em que ela chegou.</p>
@@ -64,8 +73,9 @@ export default function ConnectionManager({ operator, flash }: { operator: Opera
     <label className="live-select-label">Instância<select value={selected} onChange={(event) => { setSelected(event.target.value); setQr(''); }}><option value="">Selecione</option>{instances.map((item) => <option value={item.name} key={item.name}>{item.name}</option>)}</select></label>
     {current && <div className="live-health">{connected ? <Wifi size={28} /> : <WifiOff size={28} />}<span><b>{connected ? 'Conectado' : current.state || 'Desconectado'}</b><small>{current.profileName || current.name}{current.number ? ` · ${current.number.replace(/@.*$/, '')}` : ''}</small></span></div>}
     {operator.role === 'admin' && current && !connected && <button className="button button-primary" disabled={busy} onClick={() => void showQr()}>Exibir QR Code</button>}
+    {operator.role === 'admin' && current && connected && <button className="button button-outline" disabled={busy} onClick={() => void disconnect()}>Desconectar este número</button>}
     {qr && <img className="live-qr" src={qr} alt={`QR Code da instância ${selected}`} />}
-    {operator.role === 'admin' && channel && <form className="live-channel-settings" onSubmit={saveChannel}><h3>Finalidade e atendimento deste canal</h3><label>Nome no painel<input value={draft.displayName} onChange={(e) => setDraft({ ...draft, displayName: e.target.value })} required maxLength={80} /></label><label>Finalidade<input value={draft.purpose} onChange={(e) => setDraft({ ...draft, purpose: e.target.value })} maxLength={500} placeholder="Ex.: Atendimento comercial de locação" /></label><label>Orientações para a Eva<textarea value={draft.instructions} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} maxLength={4000} rows={4} placeholder="Regras específicas deste número" /></label><label>Equipe responsável<select value={draft.defaultTeamId} onChange={(e) => setDraft({ ...draft, defaultTeamId: e.target.value })}><option value="">Fila geral</option>{teams.filter((team) => team.active).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label><label className="live-channel-check"><input type="checkbox" checked={draft.aiEnabled} onChange={(e) => setDraft({ ...draft, aiEnabled: e.target.checked })} />Eva ativa em novas conversas</label><label className="live-channel-check"><input type="checkbox" checked={draft.active} onChange={(e) => setDraft({ ...draft, active: e.target.checked })} />Canal ativo</label><button className="button button-primary" disabled={busy}>Salvar canal</button></form>}
+    {operator.role === 'admin' && channel && <form className="live-channel-settings" onSubmit={saveChannel}><h3>Finalidade e atendimento deste canal</h3><label>Nome no painel<input value={draft.displayName} onChange={(e) => setDraft({ ...draft, displayName: e.target.value })} required maxLength={80} /></label><label>Finalidade<input value={draft.purpose} onChange={(e) => setDraft({ ...draft, purpose: e.target.value })} maxLength={500} placeholder="Ex.: Atendimento comercial de locação" /></label><label>Orientações para a Eva<textarea value={draft.instructions} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} maxLength={4000} rows={4} placeholder="Regras específicas deste número" /></label><label>Equipe responsável<select value={draft.defaultTeamId} onChange={(e) => setDraft({ ...draft, defaultTeamId: e.target.value })}><option value="">Fila geral · sem Eva</option>{teams.filter((team) => team.active).map((team) => <option key={team.id} value={team.id}>{team.name}{team.ai_enabled ? ' · Eva ativa' : ''}</option>)}</select></label><label className="live-channel-check"><input type="checkbox" checked={draft.aiEnabled} disabled={!draft.defaultTeamId || !teams.some((team) => team.id === draft.defaultTeamId && team.ai_enabled)} onChange={(e) => setDraft({ ...draft, aiEnabled: e.target.checked })} />Permitir Eva neste canal quando a equipe também estiver ativada</label><label className="live-channel-check"><input type="checkbox" checked={draft.active} onChange={(e) => setDraft({ ...draft, active: e.target.checked })} />Canal ativo</label><button className="button button-primary" disabled={busy}>Salvar canal</button></form>}
     {operator.role === 'admin' && <form className="live-new-channel" onSubmit={create}><h3>Conectar outro número</h3><p>A nova instância receberá o mesmo webhook de mensagens da operação atual.</p><label>Nome da instância<input value={name} onChange={(event) => setName(event.target.value)} placeholder="ex.: lopes-aluga-2" pattern="[A-Za-z0-9_-]{3,48}" minLength={3} maxLength={48} required /></label><button className="button button-outline" disabled={busy}>Criar instância</button></form>}
   </section>;
 }
