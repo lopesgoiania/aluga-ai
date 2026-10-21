@@ -160,4 +160,7 @@ button.live-row { cursor:pointer; }.live-row>span:first-of-type { flex:1; min-wi
 .live-channel-settings label:not(.live-channel-check) { display:grid; gap:5px; color:#60768a; font-size:12px; }
 .live-channel-settings input:not([type=checkbox]),.live-channel-settings textarea,.live-channel-settings select { width:100%; min-height:40px; padding:9px; border:1px solid #cedce7; border-radius:8px; background:#fff; color:#203447; font:inherit; }
 .live-channel-check { display:flex; align-items:center; gap:8px; font-size:12px; }
+.live-channel-hint,.live-channel-status { margin:0; color:#526b80; font-size:12px; line-height:1.5; }
+.live-channel-hint { margin-top:-7px; }
+.live-channel-status { padding:9px 11px; border-radius:8px; background:#eef5fb; }
 .live-channel-settings button { justify-self:start; }

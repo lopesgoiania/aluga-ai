@@ -30,7 +30,7 @@ export default function ConnectionManager({ operator, flash }: { operator: Opera
   }, []);
   useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 15000); return () => window.clearInterval(timer); }, [load]);
   const channel = channels.find((item) => item.instance_name === selected);
-  useEffect(() => { if (channel) setDraft({ displayName: channel.display_name, purpose: channel.purpose || '', instructions: channel.instructions || '', defaultTeamId: channel.default_team_id || '', aiEnabled: channel.ai_enabled, active: channel.active }); }, [channel?.id, selected]);
+  useEffect(() => { if (channel) setDraft({ displayName: channel.display_name, purpose: channel.purpose || '', instructions: channel.instructions || '', defaultTeamId: channel.default_team_id || '', aiEnabled: channel.ai_enabled, active: channel.active }); }, [channel?.id, channel?.display_name, channel?.purpose, channel?.instructions, channel?.default_team_id, channel?.ai_enabled, channel?.active, selected]);
   async function showQr() {
     if (!selected) return; setBusy(true); setQr('');
     try {
@@ -68,6 +68,23 @@ export default function ConnectionManager({ operator, flash }: { operator: Opera
   }
   const current = instances.find((item) => item.name === selected);
   const connected = ['open', 'connected'].includes(String(current?.state).toLowerCase());
+  const assignedTeam = teams.find((team) => team.id === draft.defaultTeamId && team.active);
+  const savedTeam = teams.find((team) => team.id === channel?.default_team_id && team.active);
+  const canTurnEvaOn = Boolean(assignedTeam?.ai_enabled);
+  const hasPendingChanges = Boolean(channel && (
+    draft.displayName !== channel.display_name || draft.purpose !== (channel.purpose || '') ||
+    draft.instructions !== (channel.instructions || '') || draft.defaultTeamId !== (channel.default_team_id || '') ||
+    draft.aiEnabled !== channel.ai_enabled || draft.active !== channel.active
+  ));
+  const evaStatus = !channel?.ai_enabled
+    ? 'Eva desligada neste canal.'
+    : !savedTeam
+      ? 'Eva bloqueada: escolha uma equipe responsável e habilite a Eva nela.'
+      : !savedTeam.ai_enabled
+        ? `Eva bloqueada: habilite-a na equipe ${savedTeam.name}.`
+        : !channel.active
+          ? 'Eva bloqueada: este canal está inativo.'
+          : `Eva habilitada para a equipe ${savedTeam.name} neste canal.`;
   return <section className="live-card live-connection"><h2>Canais WhatsApp</h2><p>Selecione uma instância para conferir a conexão. As respostas de cada conversa saem pelo número em que ela chegou.</p>
     {error && <div className="live-error">{error}</div>}
     <label className="live-select-label">Instância<select value={selected} onChange={(event) => { setSelected(event.target.value); setQr(''); }}><option value="">Selecione</option>{instances.map((item) => <option value={item.name} key={item.name}>{item.name}</option>)}</select></label>
@@ -75,7 +92,7 @@ export default function ConnectionManager({ operator, flash }: { operator: Opera
     {operator.role === 'admin' && current && !connected && <button className="button button-primary" disabled={busy} onClick={() => void showQr()}>Exibir QR Code</button>}
     {operator.role === 'admin' && current && connected && <button className="button button-outline" disabled={busy} onClick={() => void disconnect()}>Desconectar este número</button>}
     {qr && <img className="live-qr" src={qr} alt={`QR Code da instância ${selected}`} />}
-    {operator.role === 'admin' && channel && <form className="live-channel-settings" onSubmit={saveChannel}><h3>Finalidade e atendimento deste canal</h3><label>Nome no painel<input value={draft.displayName} onChange={(e) => setDraft({ ...draft, displayName: e.target.value })} required maxLength={80} /></label><label>Finalidade<input value={draft.purpose} onChange={(e) => setDraft({ ...draft, purpose: e.target.value })} maxLength={500} placeholder="Ex.: Atendimento comercial de locação" /></label><label>Orientações para a Eva<textarea value={draft.instructions} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} maxLength={4000} rows={4} placeholder="Regras específicas deste número" /></label><label>Equipe responsável<select value={draft.defaultTeamId} onChange={(e) => setDraft({ ...draft, defaultTeamId: e.target.value })}><option value="">Fila geral · sem Eva</option>{teams.filter((team) => team.active).map((team) => <option key={team.id} value={team.id}>{team.name}{team.ai_enabled ? ' · Eva ativa' : ''}</option>)}</select></label><label className="live-channel-check"><input type="checkbox" checked={draft.aiEnabled} disabled={!draft.defaultTeamId || !teams.some((team) => team.id === draft.defaultTeamId && team.ai_enabled)} onChange={(e) => setDraft({ ...draft, aiEnabled: e.target.checked })} />Permitir Eva neste canal quando a equipe também estiver ativada</label><label className="live-channel-check"><input type="checkbox" checked={draft.active} onChange={(e) => setDraft({ ...draft, active: e.target.checked })} />Canal ativo</label><button className="button button-primary" disabled={busy}>Salvar canal</button></form>}
+    {operator.role === 'admin' && channel && <form className="live-channel-settings" onSubmit={saveChannel}><h3>Finalidade e atendimento deste canal</h3><label>Nome no painel<input value={draft.displayName} onChange={(e) => setDraft({ ...draft, displayName: e.target.value })} required maxLength={80} /></label><label>Finalidade<input value={draft.purpose} onChange={(e) => setDraft({ ...draft, purpose: e.target.value })} maxLength={500} placeholder="Ex.: Atendimento comercial de locação" /></label><label>Orientações para a Eva<textarea value={draft.instructions} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} maxLength={4000} rows={4} placeholder="Regras específicas deste número" /></label><label>Equipe responsável<select value={draft.defaultTeamId} onChange={(e) => { const teamId = e.target.value; const nextTeam = teams.find((team) => team.id === teamId && team.active); setDraft({ ...draft, defaultTeamId: teamId, aiEnabled: draft.aiEnabled && Boolean(nextTeam?.ai_enabled) }); }}><option value="">Sem equipe atribuída</option>{teams.filter((team) => team.active).map((team) => <option key={team.id} value={team.id}>{team.name}{team.ai_enabled ? ' · Eva habilitada' : ''}</option>)}</select></label><p className="live-channel-hint">Conversas sem equipe atribuída vão para a fila geral. Essa fila não é uma equipe cadastrada.</p><label className="live-channel-check"><input type="checkbox" checked={draft.aiEnabled} disabled={!draft.aiEnabled && !canTurnEvaOn} onChange={(e) => setDraft({ ...draft, aiEnabled: e.target.checked })} />Permitir Eva neste canal</label><p className="live-channel-status" role="status">{evaStatus}{hasPendingChanges ? ' Há alterações pendentes; salve o canal para aplicá-las.' : ''}</p><label className="live-channel-check"><input type="checkbox" checked={draft.active} onChange={(e) => setDraft({ ...draft, active: e.target.checked })} />Canal ativo</label><button className="button button-primary" disabled={busy}>Salvar canal</button></form>}
     {operator.role === 'admin' && <form className="live-new-channel" onSubmit={create}><h3>Conectar outro número</h3><p>A nova instância receberá o mesmo webhook de mensagens da operação atual.</p><label>Nome da instância<input value={name} onChange={(event) => setName(event.target.value)} placeholder="ex.: lopes-aluga-2" pattern="[A-Za-z0-9_-]{3,48}" minLength={3} maxLength={48} required /></label><button className="button button-outline" disabled={busy}>Criar instância</button></form>}
   </section>;
 }
