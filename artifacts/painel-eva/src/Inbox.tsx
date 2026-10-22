@@ -48,7 +48,7 @@ function Media({ message, sessionId }: { message: MessageRow; sessionId: string 
 function Avatar({ session }: { session: SessionRow }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [session.id]);
-  return failed ? <span className="live-avatar">{displayName(session).slice(0, 2).toUpperCase()}</span> : <img className="live-avatar-photo" src={`/api/conversations/${session.id}/avatar`} alt="" loading="lazy" onError={() => setFailed(true)} />;
+  return failed ? <span className="live-avatar">{displayName(session).slice(0, 2).toUpperCase()}</span> : <img className="live-avatar-photo" src={`/api/conversations/${session.id}/avatar?initials=${encodeURIComponent(displayName(session).slice(0, 2))}`} alt="" loading="lazy" onError={() => setFailed(true)} />;
 }
 
 export default function Inbox(props: Props) {
@@ -283,7 +283,7 @@ export default function Inbox(props: Props) {
     </aside>
     <section className={`live-thread ${showList ? 'live-mobile-hidden' : ''}`}>
       {selected ? <><div className="live-thread-head"><button className="live-back" onClick={() => setShowList(true)} aria-label="Voltar à lista"><ArrowLeft size={18} /></button>
-        {!avatarFailed ? <img className="live-avatar-photo" src={`/api/conversations/${selected.id}/avatar`} alt="Foto do contato" onError={() => setAvatarFailed(true)} /> : <span className="live-avatar">{displayName(selected).slice(0, 2).toUpperCase()}</span>}
+        {!avatarFailed ? <img className="live-avatar-photo" src={`/api/conversations/${selected.id}/avatar?initials=${encodeURIComponent(displayName(selected).slice(0, 2))}`} alt="Foto do contato" onError={() => setAvatarFailed(true)} /> : <span className="live-avatar">{displayName(selected).slice(0, 2).toUpperCase()}</span>}
         <div><b>{displayName(selected)}</b><small>{phoneLabel(selected.phone)} · {selected.channel || 'WhatsApp'}</small></div><button className="live-context-toggle" onClick={() => setShowContext(!showContext)} aria-label="Mostrar dados do contato"><UserRound size={17} /></button><span className="live-state">{stateOf(selected)}</span><div className="live-transfer-wrap"><button type="button" className="live-transfer-trigger" disabled={!routingReady || busy} title={routingReady ? 'Transferir atendimento' : 'Disponível após a migração do banco operacional'} aria-expanded={transferOpen} onClick={() => setTransferOpen(!transferOpen)}>Transferir</button>{transferOpen && <div className="live-transfer-menu"><strong>Enviar atendimento para</strong><button onClick={() => void route('new')}>Novos · sem responsável</button><button onClick={() => void route('eva')}>LIA · atendimento automático</button>{availableTeams.length > 0 && <strong>Equipes</strong>}{availableTeams.map((team) => <button key={team.id} onClick={() => void route('team', team.id)}>{team.name}</button>)}{operators.length > 0 && <strong>Atendentes</strong>}{operators.map((item) => <button key={item.user_id} onClick={() => void route('operator', item.user_id)}>{item.display_name}{item.user_id === operator.user_id ? ' · você' : ''}</button>)}</div>}</div>
       </div><div className="live-thread-body" aria-label="Mensagens da conversa">
         {detail?.session.id === selected.id ? detail.messages.map((message) => <div className={`live-message ${message.direction === 'outbound' ? 'outbound' : ''}`} key={message.id}>

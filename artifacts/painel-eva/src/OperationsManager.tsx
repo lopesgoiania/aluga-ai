@@ -28,7 +28,11 @@ export function OperationsManager({ operator, flash }: { operator: Operator; fla
   useEffect(() => { void load().catch((error) => flash(error instanceof Error ? error.message : 'Falha ao carregar equipe')); }, []);
   async function invite(event: FormEvent) {
     event.preventDefault(); setBusy(true);
-    try { await api('/operators/invite', { method: 'POST', body: { email, displayName: name, role, teamIds: inviteTeamIds } }); await load(); setEmail(''); setName(''); setInviteTeamIds([]); flash('Convite enviado ao novo usuário.'); }
+    try {
+      const result = await api<{ invitationSent: boolean; reactivated: boolean }>('/operators/invite', { method: 'POST', body: { email, displayName: name, role, teamIds: inviteTeamIds } });
+      await load(); setEmail(''); setName(''); setInviteTeamIds([]);
+      flash(result.reactivated ? result.invitationSent ? 'Acesso reativado e convite reenviado.' : 'Acesso reativado. O usuário pode entrar com a senha anterior.' : 'Convite enviado ao novo usuário.');
+    }
     catch (error) { flash(error instanceof Error ? error.message : 'Falha ao convidar usuário'); }
     finally { setBusy(false); }
   }

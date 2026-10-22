@@ -68,7 +68,7 @@ function App() {
         if (!alive) return;
         setSetup(current);
         if (current.configured && !inviteTokens) {
-          try { const user = await api<{ operator: Operator }>('/auth/me'); if (alive) setOperator(user.operator); }
+          try { const user = await api<{ operator: Operator | null }>('/auth/me'); if (alive && user.operator) setOperator(user.operator); }
           catch (error) { if (alive && error instanceof ApiError && error.status !== 401) setAuthError(error.message); }
         }
       } catch (error) { if (alive) setAuthError(error instanceof Error ? error.message : 'Falha na API'); }

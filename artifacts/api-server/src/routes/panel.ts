@@ -132,7 +132,10 @@ router.post("/auth/logout", (_req, res) => {
   res.clearCookie("eva_refresh", cookieOptions);
   res.json({ ok: true });
 });
-router.get("/auth/me", requireOperator, (req: AuthRequest, res) => res.json({ operator: req.operator }));
+router.get("/auth/me", (req, res, next) => {
+  if (!req.cookies?.eva_access && !req.cookies?.eva_refresh) return res.json({ operator: null });
+  return requireOperator(req, res, next);
+}, (req: AuthRequest, res) => res.json({ operator: req.operator }));
 
 router.use(requireOperator);
 
@@ -305,13 +308,21 @@ router.post("/operators/invite", async (req: AuthRequest, res) => {
     const activeIds = new Set((available as any[]).map((team) => team.id));
     if (teamIds.some((id) => !activeIds.has(id))) throw new UpstreamError("Uma equipe selecionada não está disponível", 409);
   }
-  const invited = await authRequest(invitePath(req), { method: "POST", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` }, body: JSON.stringify({ email, data: { display_name: displayName } }) });
-  const userId = invited?.id ?? invited?.user?.id;
-  if (!userId || !uuid.test(userId)) throw new UpstreamError("Convite criado, mas o usuário não foi identificado. Confira no Supabase Auth.", 502);
+  const authUsers = await authRequest("admin/users?page=1&per_page=1000", { headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` } });
+  const existing = (authUsers?.users ?? []).find((user: any) => String(user.email ?? "").trim().toLowerCase() === email);
+  const existingOperator = existing ? await agentRest("panel_operators", { params: { select: "user_id,active", user_id: `eq.${existing.id}`, limit: "1" } }) : [];
+  if (existingOperator?.[0]?.active) throw new UpstreamError("Este e-mail já pertence a um usuário ativo. Edite o cadastro existente.", 409);
+  // Remover um operador preserva sua identidade no Auth e o histórico vinculado ao mesmo ID.
+  // Contas confirmadas voltam a usar a senha anterior; só contas novas ou pendentes recebem convite.
+  const needsInvite = !existing || !existing.email_confirmed_at;
+  const invited = needsInvite ? await authRequest(invitePath(req), { method: "POST", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` }, body: JSON.stringify({ email, data: { display_name: displayName } }) }) : null;
+  const userId = existing?.id ?? invited?.id ?? invited?.user?.id;
+  if (!userId || !uuid.test(userId)) throw new UpstreamError("Não foi possível identificar o usuário no Supabase Auth.", 502);
+  if (invited && (invited?.id ?? invited?.user?.id) !== userId) throw new UpstreamError("O convite retornou uma conta diferente. Confira o usuário no Supabase Auth.", 502);
   const rows = await agentRest("panel_operators", { method: "POST", params: { on_conflict: "user_id", select: "user_id,display_name,role,active" }, body: { user_id: userId, display_name: displayName, role, active: true }, headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
   if (teamIds.length) await agentRest("panel_team_members", { method: "POST", params: { on_conflict: "team_id,user_id" }, body: teamIds.map((teamId) => ({ team_id: teamId, user_id: userId, active: true })), headers: { Prefer: "resolution=merge-duplicates" } });
-  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_invited", details: { user_id: userId, role, team_ids: teamIds } } });
-  res.status(201).json({ operator: rows?.[0], invitationSent: true });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: existing ? "operator_reactivated" : "operator_invited", details: { user_id: userId, role, team_ids: teamIds, invitation_sent: needsInvite } } });
+  res.status(existing ? 200 : 201).json({ operator: rows?.[0], invitationSent: needsInvite, reactivated: Boolean(existing) });
 });
 router.post("/operators/:id/resend-invite", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);
@@ -546,16 +557,20 @@ router.get("/conversations/:id/avatar", async (req: AuthRequest, res) => {
   const instance = await instanceForSession(session.id);
   const number = String(session.phone ?? "").replace(/@.*$/, "").replace(/\D/g, "");
   const key = `${instance}:${number}`;
-  let url = profileCache.get(key)?.until! > Date.now() ? profileCache.get(key)!.url : "";
-  if (!url) {
-    const result = await evolution(`/chat/fetchProfilePictureUrl/${encodeURIComponent(instance)}`, { method: "POST", body: JSON.stringify({ number }) });
-    url = String(result?.profilePictureUrl ?? result?.profilePicUrl ?? "");
-    if (url && !/^https:\/\/[^\s]+$/.test(url)) url = "";
+  const cached = profileCache.get(key);
+  let url = cached && cached.until > Date.now() ? cached.url : null;
+  if (url === null) {
+    try {
+      const result = await evolution(`/chat/fetchProfilePictureUrl/${encodeURIComponent(instance)}`, { method: "POST", body: JSON.stringify({ number }) });
+      url = String(result?.profilePictureUrl ?? result?.profilePicUrl ?? "");
+      if (url && !/^https:\/\/[^\s]+$/.test(url)) url = "";
+    } catch { url = ""; }
     profileCache.set(key, { url, until: Date.now() + 5 * 60_000 });
   }
-  if (!url) throw new UpstreamError("Foto de perfil indisponível", 404);
   res.setHeader("Cache-Control", "private, max-age=300");
-  res.redirect(302, url);
+  if (url) return res.redirect(302, url);
+  const initials = String(req.query.initials ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
+  res.type("image/svg+xml").send(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect width="48" height="48" rx="24" fill="#DCEAFB"/><text x="24" y="25" text-anchor="middle" dominant-baseline="central" fill="#315A83" font-family="Arial,sans-serif" font-size="17" font-weight="700">${initials}</text></svg>`);
 });
 
 router.get("/conversations/:id/media/:messageId", async (req: AuthRequest, res) => {

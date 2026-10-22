@@ -27,6 +27,10 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let archiveReady = false;
   let disconnected = false;
   let attendantRemoved = false;
+  let invitationsSent = 0;
+  let profileImageAvailable = true;
+  let profileLookups = 0;
+  let sessionPhone = '5562999999999@s.whatsapp.net';
   const reservations = new Set();
   const upstream = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://local');
@@ -40,9 +44,10 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       if (req.method === 'PUT') { const body = JSON.parse(await new Response(req).text()); assert.equal(body.password, 'senha-segura-123'); }
       return json({ id: req.headers.authorization === 'Bearer attendant-access' ? attendantId : userId });
     }
-    if (url.pathname === '/auth/v1/admin/users') return json({ users: [{ id: userId, email: 'admin@example.test', email_confirmed_at: '2026-10-01T00:00:00Z' }, { id: attendantId, email: 'attendant@example.test', invited_at: '2026-10-20T00:00:00Z' }] });
+    if (url.pathname === '/auth/v1/admin/users') return json({ users: [{ id: userId, email: 'admin@example.test', email_confirmed_at: '2026-10-01T00:00:00Z' }, { id: attendantId, email: 'attendant@example.test', invited_at: '2026-10-20T00:00:00Z', email_confirmed_at: attendantRemoved ? '2026-10-21T00:00:00Z' : null }] });
     if (url.pathname === `/auth/v1/admin/users/${attendantId}`) return json({ id: attendantId, email: 'attendant@example.test', invited_at: '2026-10-20T00:00:00Z' });
     if (url.pathname === '/auth/v1/invite') {
+      invitationsSent++;
       const body = JSON.parse(await new Response(req).text());
       return json({ id: body.email === 'attendant@example.test' ? attendantId : invitedId, email: body.email });
     }
@@ -51,14 +56,14 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
         if (url.searchParams.get('user_id') === `eq.${attendantId}`) { attendantRemoved = true; return json([{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: false }]); }
         return json([{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true }]);
       }
-      if (req.method === 'POST') return json([{ user_id: invitedId, display_name: 'Novo Usuário', role: 'attendant', active: true }]);
+      if (req.method === 'POST') { const body = JSON.parse(await new Response(req).text()); if (body.user_id === attendantId) attendantRemoved = false; return json([{ user_id: body.user_id, display_name: body.display_name, role: body.role, active: true }]); }
       if (url.searchParams.get('active') === 'eq.true') return json([{ user_id: userId, display_name: 'Operador Teste', role: 'admin', active: true }, { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }]);
       if (url.searchParams.get('user_id') === `eq.${attendantId}`) return json([{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: !attendantRemoved }]);
       if (!url.searchParams.has('user_id')) return json([{ user_id: userId, display_name: 'Operador Teste', role: 'admin', active: true }, { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }]);
       return json(url.searchParams.get('user_id') === `eq.${attendantId}` ? [{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }] : [{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true }]);
     }
     if (url.pathname === '/rest/v1/chat_sessions') return json([
-      { id: sessionId, channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', contact_id: contactId, phone: '5562999999999@s.whatsapp.net', status: 'atendimento_humano', ai_enabled: false, created_at: '2026-10-02T12:00:00Z' },
+      { id: sessionId, channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', contact_id: contactId, phone: sessionPhone, status: 'atendimento_humano', ai_enabled: false, created_at: '2026-10-02T12:00:00Z' },
       { id: '77777777-7777-4777-8777-777777777777', channel_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', contact_id: contactId, phone: '5562999999999@s.whatsapp.net', status: 'qualificando', ai_enabled: true, created_at: '2026-09-20T12:00:00Z' },
     ]);
     if (url.pathname === '/rest/v1/contacts') return json([{ id: contactId, name: 'Cliente Teste', phone: '5562999999999', metadata: {} }]);
@@ -90,7 +95,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/instance/connectionState/Teste') return json({ instance: { state: 'open' } });
     if (url.pathname === '/instance/fetchInstances') return json([{ name: 'Teste', connectionStatus: 'open', ownerJid: '5562999999999@s.whatsapp.net' }]);
     if (url.pathname === '/instance/logout/Teste' && req.method === 'DELETE') { disconnected = true; return json({ status: 'SUCCESS' }); }
-    if (url.pathname === '/chat/fetchProfilePictureUrl/Teste') return json({ profilePictureUrl: 'https://example.test/avatar.jpg' });
+    if (url.pathname === '/chat/fetchProfilePictureUrl/Teste') { profileLookups++; return json({ profilePictureUrl: profileImageAvailable ? 'https://example.test/avatar.jpg' : '' }); }
     if (url.pathname === '/chat/findMessages/Teste') return json({ messages: { records: [{ key: { id: 'AUDIO-1' } }] } });
     if (url.pathname === '/chat/getBase64FromMediaMessage/Teste') return json({ mimetype: 'audio/ogg', base64: Buffer.from('media').toString('base64') });
     if (url.pathname === '/rest/v1/rpc/panel_takeover_and_reserve_outbound') {
@@ -128,6 +133,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     }
     assert.equal(healthy, true, 'API started');
     assert.equal((await (await fetch(`${base}/setup`)).json()).configured, true);
+    assert.deepEqual(await (await fetch(`${base}/auth/me`)).json(), { operator: null }, 'Visitante sem sessão deve abrir login sem erro 401');
     assert.equal((await fetch(`${base}/conversations`)).status, 401);
     const login = await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.test', password: 'test' }) });
     assert.equal(login.status, 200);
@@ -145,6 +151,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(managed.operators.find((item) => item.user_id === attendantId).email_confirmed_at, null);
     const invite = await fetch(`${base}/operators/invite`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'novo@example.test', displayName: 'Novo Usuário', role: 'attendant', teamIds: [teamId] }) });
     assert.equal((await invite.json()).invitationSent, true);
+    const duplicate = await fetch(`${base}/operators/invite`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.test', displayName: 'Duplicado', role: 'admin' }) });
+    assert.equal(duplicate.status, 409, 'Conta ativa não deve receber novo cadastro');
     const resend = await fetch(`${base}/operators/${attendantId}/resend-invite`, { method: 'POST', headers: { Cookie: cookie } });
     assert.equal((await resend.json()).sent, true);
     const signature = await fetch(`${base}/operators/me`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ signature: 'Vilarinho' }) });
@@ -208,5 +216,20 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     const removeUser = await fetch(`${base}/operators/${attendantId}`, { method: 'DELETE', headers: { Cookie: cookie } });
     assert.equal((await removeUser.json()).historyPreserved, true);
     assert.equal((await attendantGet('/conversations')).status, 403, 'Acesso removido deve ser bloqueado mesmo com sessão aberta');
+    const invitesBeforeRestore = invitationsSent;
+    const restore = await fetch(`${base}/operators/invite`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'attendant@example.test', displayName: 'Outra Pessoa', role: 'attendant', teamIds: [teamId] }) });
+    assert.equal(restore.status, 200);
+    assert.deepEqual(((await restore.json())), { operator: { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }, invitationSent: false, reactivated: true });
+    assert.equal(invitationsSent, invitesBeforeRestore, 'Conta confirmada deve ser reativada sem novo convite');
+    assert.equal((await attendantGet('/conversations')).status, 200, 'Conta reativada deve recuperar acesso com o mesmo ID');
+    sessionPhone = '5562888888888@s.whatsapp.net';
+    profileImageAvailable = false;
+    const noPhoto = await get(`/conversations/${sessionId}/avatar?initials=CT`);
+    assert.equal(noPhoto.status, 200);
+    assert.match(noPhoto.headers.get('content-type'), /image\/svg\+xml/);
+    assert.match(await noPhoto.text(), />CT<\/text>/);
+    const lookupsAfterFallback = profileLookups;
+    assert.equal((await get(`/conversations/${sessionId}/avatar?initials=CT`)).status, 200);
+    assert.equal(profileLookups, lookupsAfterFallback, 'Ausência de foto deve ser cacheada');
   } finally { child.kill(); await close(upstream); }
 });
