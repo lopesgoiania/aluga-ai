@@ -98,7 +98,15 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/storage/v1/object/authenticated/eva-media/Teste/AUDIO-1') { res.writeHead(200, { 'Content-Type': 'audio/ogg' }); res.end('archived-media'); return; }
     if (url.pathname === '/rest/v1/panel_audit_log') return json({});
     if (url.pathname === '/rest/v1/property_interests') return json([]);
-    if (url.pathname === '/rest/v1/agent_events') return json([]);
+    if (url.pathname === '/rest/v1/agent_knowledge') {
+      if (req.method === 'POST' || req.method === 'PATCH') {
+        const body = JSON.parse(await new Response(req).text());
+        assert.equal(body.audience, 'proprietario');
+        return json([{ id: invitedId, title: body.title, content: body.content, audience: body.audience, status: 'draft', version: 1 }]);
+      }
+      return json([{ id: invitedId, title: 'Procedimento de captação', content: 'A equipe entra em contato com o proprietário.', audience: 'proprietario', status: 'approved', scope: 'global', source_type: 'manual', version: 1, updated_at: '2026-10-22T12:00:00Z' }]);
+    }
+    if (url.pathname === '/rest/v1/agent_events') return json(url.searchParams.get('event_type') === 'eq.agent_decision' ? [{ id: invitedId, session_id: sessionId, created_at: '2026-10-22T12:00:00Z', payload: { knowledge_gap: true, combined_content: 'Qual é a taxa de administração?', handoff_reason: 'Sem fonte aprovada' } }] : []);
     if (url.pathname === '/rest/v1/panel_outbound') return json(url.searchParams.has('session_id') ? [] : [{ id: outboundId, session_id: sessionId, body: 'Pendente', status: 'uncertain', created_at: '2026-10-02T12:00:00Z' }]);
     if (url.pathname === '/rest/v1/properties') return json([{ source_property_id: 'R-1', title: 'Galpão', city: 'Goiânia', area: 200 }]);
     if (url.pathname === '/instance/connectionState/Teste') return json({ instance: { state: 'open' } });
@@ -155,6 +163,16 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(conversations.conversations[0].contact.name, 'Cliente Teste');
     assert.equal(conversations.conversations[0].tags[0].slug, 'inquilino');
     assert.equal((await (await get('/operators')).json()).operators.length, 2);
+    const knowledge = await (await get('/knowledge')).json();
+    assert.equal(knowledge.audienceEnabled, true);
+    assert.equal(knowledge.entries[0].audience, 'proprietario');
+    const gaps = await (await get('/knowledge/gaps')).json();
+    assert.equal(gaps.gaps[0].question, 'Qual é a taxa de administração?');
+    const addKnowledge = await fetch(`${base}/knowledge`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Captação de imóvel', content: 'A equipe entra em contato com o proprietário.', audience: 'proprietario' }) });
+    assert.equal(addKnowledge.status, 201);
+    assert.equal((await addKnowledge.json()).entry.audience, 'proprietario');
+    const invalidAudience = await fetch(`${base}/knowledge`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Inadequado', content: 'Teste', audience: 'todos' }) });
+    assert.equal(invalidAudience.status, 400);
     const managed = await (await get('/operators/manage')).json();
     assert.equal(managed.operators.find((item) => item.user_id === attendantId).email, 'attendant@example.test');
     assert.equal(managed.operators.find((item) => item.user_id === attendantId).email_confirmed_at, null);
@@ -230,6 +248,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(attendantLogin.status, 200);
     const attendantCookie = attendantLogin.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
     const attendantGet = (path) => fetch(`${base}${path}`, { headers: { Cookie: attendantCookie } });
+    assert.equal((await attendantGet('/knowledge/gaps')).status, 403, 'Lacunas de conhecimento exigem supervisor ou administrador');
     const forbiddenReset = await fetch(`${base}/operators/${userId}/password`, { method: 'PUT', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'senha-tentativa-123' }) });
     assert.equal(forbiddenReset.status, 403, 'Atendente não pode definir senha de outro usuário');
     assert.equal((await (await attendantGet('/conversations')).json()).conversations.length, 2);

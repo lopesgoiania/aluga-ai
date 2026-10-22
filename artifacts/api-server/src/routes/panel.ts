@@ -166,12 +166,41 @@ router.post("/auth/change-password", async (req: AuthRequest, res) => {
 const knowledgeInput = (body: any) => {
   const title = String(body?.title ?? "").trim();
   const content = String(body?.content ?? "").trim();
+  const audience = String(body?.audience ?? "all");
   if (!title || title.length > 160 || !content || content.length > 16000) throw new UpstreamError("Informe título e conteúdo (até 16 mil caracteres)", 400);
-  return { title, content };
+  if (!["all", "inquilino", "proprietario", "corretor"].includes(audience)) throw new UpstreamError("Público inválido", 400);
+  return { title, content, audience };
 };
+async function writeKnowledge(method: "POST" | "PATCH", params: Record<string, string>, body: Record<string, unknown>) {
+  const headers = { Prefer: "return=representation" };
+  try { return await agentRest("agent_knowledge", { method, params, body, headers }); }
+  catch (error) {
+    if (!(error instanceof UpstreamError) || error.status !== 400 || !/audience/i.test(error.message)) throw error;
+    if (body.audience !== "all") throw new UpstreamError("Ative a classificação por público no banco antes de salvar esta informação", 409);
+    const { audience: _audience, ...legacyBody } = body;
+    return agentRest("agent_knowledge", { method, params, body: legacyBody, headers });
+  }
+}
 router.get("/knowledge", async (_req, res) => {
-  const entries = await agentRest("agent_knowledge", { params: { select: "id,title,content,status,scope,source_type,source_path,version,created_at,updated_at,approved_at", order: "updated_at.desc", limit: "200" } });
-  res.json({ entries });
+  const fields = "id,title,content,status,scope,source_type,source_path,version,created_at,updated_at,approved_at";
+  try {
+    const entries = await agentRest("agent_knowledge", { params: { select: `${fields},audience`, order: "updated_at.desc", limit: "200" } });
+    res.json({ entries, audienceEnabled: true });
+  } catch (error) {
+    if (!(error instanceof UpstreamError) || error.status !== 400 || !/audience/i.test(error.message)) throw error;
+    const entries = await agentRest("agent_knowledge", { params: { select: fields, order: "updated_at.desc", limit: "200" } });
+    res.json({ entries: (entries as any[]).map((entry) => ({ ...entry, audience: "all" })), audienceEnabled: false });
+  }
+});
+router.get("/knowledge/gaps", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  const events = await agentRest("agent_events", { params: { select: "id,session_id,created_at,payload", event_type: "eq.agent_decision", order: "created_at.desc", limit: "200" } });
+  const gaps = (events as any[]).filter((event) => event.payload?.knowledge_gap === true).slice(0, 30).map((event) => ({
+    id: event.id, session_id: event.session_id, created_at: event.created_at,
+    question: String(event.payload?.combined_content ?? "").slice(0, 600),
+    reason: String(event.payload?.handoff_reason ?? "Sem fonte aprovada").slice(0, 200),
+  }));
+  res.json({ gaps });
 });
 router.get("/knowledge/suggestions", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin", "supervisor"]);
@@ -187,13 +216,15 @@ router.post("/knowledge/suggestions/:id/review", async (req: AuthRequest, res) =
 router.post("/knowledge", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin", "supervisor"]);
   const input = knowledgeInput(req.body);
-  const created = await agentRest("agent_knowledge", { method: "POST", params: { select: "*" }, body: { ...input, status: "draft", scope: "global", created_by: req.operator!.user_id }, headers: { Prefer: "return=representation" } });
+  const created = await writeKnowledge("POST", { select: "*" }, { ...input, status: "draft", scope: "global", created_by: req.operator!.user_id });
   await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "knowledge_created", details: { knowledge_id: created[0].id } } });
   res.status(201).json({ entry: created[0] });
 });
 router.post("/knowledge/documents", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin", "supervisor"]);
   const title = String(req.body?.title ?? "").trim();
+  const audience = String(req.body?.audience ?? "all");
+  if (!["all", "inquilino", "proprietario", "corretor"].includes(audience)) throw new UpstreamError("Público inválido", 400);
   const mime = String(req.body?.mimeType ?? "").split(";")[0].toLowerCase();
   const raw = String(req.body?.base64 ?? "");
   const filename = String(req.body?.fileName ?? "documento").replace(/[^\p{L}\p{N}._-]/gu, "_").slice(0, 100);
@@ -206,7 +237,7 @@ router.post("/knowledge/documents", async (req: AuthRequest, res) => {
     body: new Uint8Array(bytes), signal: AbortSignal.timeout(30000),
   }).catch(() => null);
   if (!uploaded?.ok) throw new UpstreamError("Não foi possível arquivar o documento", 502);
-  const created = await agentRest("agent_knowledge", { method: "POST", params: { select: "*" }, body: { title, content: "Aguardando revisão e transcrição do documento anexado.", status: "draft", scope: "global", source_type: "document", source_path: path, created_by: req.operator!.user_id }, headers: { Prefer: "return=representation" } });
+  const created = await writeKnowledge("POST", { select: "*" }, { title, audience, content: "Aguardando revisão e transcrição do documento anexado.", status: "draft", scope: "global", source_type: "document", source_path: path, created_by: req.operator!.user_id });
   await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "knowledge_document_uploaded", details: { knowledge_id: created[0].id, file_name: filename } } });
   res.status(201).json({ entry: created[0] });
 });
@@ -230,7 +261,7 @@ router.patch("/knowledge/:id", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin", "supervisor"]);
   const id = safeId(String(req.params.id));
   const input = knowledgeInput(req.body);
-  const updated = await agentRest("agent_knowledge", { method: "PATCH", params: { id: `eq.${id}`, select: "*" }, body: input, headers: { Prefer: "return=representation" } });
+  const updated = await writeKnowledge("PATCH", { id: `eq.${id}`, select: "*" }, input);
   if (!updated?.length) throw new UpstreamError("Conhecimento não encontrado", 404);
   await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "knowledge_edited", details: { knowledge_id: id, version: updated[0].version } } });
   res.json({ entry: updated[0] });
