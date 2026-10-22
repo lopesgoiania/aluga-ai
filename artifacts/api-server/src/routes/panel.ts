@@ -139,6 +139,30 @@ router.get("/auth/me", (req, res, next) => {
 
 router.use(requireOperator);
 
+router.post("/auth/change-password", async (req: AuthRequest, res) => {
+  const currentPassword = String(req.body?.currentPassword ?? "");
+  const newPassword = String(req.body?.newPassword ?? "");
+  if (!currentPassword || newPassword.length < 10 || newPassword.length > 128) throw new UpstreamError("Informe a senha atual e uma nova senha de 10 a 128 caracteres", 400);
+  if (currentPassword === newPassword) throw new UpstreamError("Escolha uma senha diferente da atual", 400);
+  const key = config.agentKey();
+  const headers = { apikey: key, Authorization: `Bearer ${key}` };
+  const account = await authRequest(`admin/users/${req.operator!.user_id}`, { headers });
+  if (!account?.email) throw new UpstreamError("Conta de acesso não encontrada", 404);
+  let verified: any;
+  try { verified = await authRequest("token?grant_type=password", { method: "POST", body: JSON.stringify({ email: account.email, password: currentPassword }) }); }
+  catch (error) {
+    if (error instanceof UpstreamError && [400, 401].includes(error.status)) throw new UpstreamError("Senha atual incorreta", 400);
+    throw error;
+  }
+  const verifiedUser = await authRequest("user", { headers: { Authorization: `Bearer ${verified.access_token}` } });
+  if (verifiedUser?.id !== req.operator!.user_id) throw new UpstreamError("Não foi possível confirmar a conta", 403);
+  await authRequest(`admin/users/${req.operator!.user_id}`, { method: "PUT", headers, body: JSON.stringify({ password: newPassword }) });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_password_changed", details: { user_id: req.operator!.user_id } } });
+  res.clearCookie("eva_access", cookieOptions);
+  res.clearCookie("eva_refresh", cookieOptions);
+  res.json({ changed: true });
+});
+
 const knowledgeInput = (body: any) => {
   const title = String(body?.title ?? "").trim();
   const content = String(body?.content ?? "").trim();
@@ -293,6 +317,51 @@ router.patch("/operators/me", async (req: AuthRequest, res) => {
   if (signature.length > 80) throw new UpstreamError("Assinatura deve ter até 80 caracteres", 400);
   const rows = await agentRest("panel_operators", { method: "PATCH", params: { user_id: `eq.${req.operator!.user_id}`, select: "user_id,display_name,signature,role,active" }, body: { signature: signature || null }, headers: { Prefer: "return=representation" } });
   res.json({ operator: rows?.[0] });
+});
+
+router.post("/operators", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const displayName = String(req.body?.displayName ?? "").trim();
+  const role = String(req.body?.role ?? "attendant");
+  const password = String(req.body?.password ?? "");
+  const teamIds = req.body?.teamIds ?? [];
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !displayName || displayName.length > 80 || !["admin", "supervisor", "attendant"].includes(role)) throw new UpstreamError("Informe e-mail, nome e função válidos", 400);
+  if (password.length < 10 || password.length > 128) throw new UpstreamError("Use uma senha de 10 a 128 caracteres", 400);
+  if (!Array.isArray(teamIds) || teamIds.length > 20 || teamIds.some((id) => typeof id !== "string" || !uuid.test(id)) || new Set(teamIds).size !== teamIds.length) throw new UpstreamError("Equipes inválidas", 400);
+  if (teamIds.length) {
+    const available = await agentRest("panel_teams", { params: { select: "id", active: "eq.true" } });
+    const activeIds = new Set((available as any[]).map((team) => team.id));
+    if (teamIds.some((id) => !activeIds.has(id))) throw new UpstreamError("Uma equipe selecionada não está disponível", 409);
+  }
+  const key = config.agentKey();
+  const headers = { apikey: key, Authorization: `Bearer ${key}` };
+  const authUsers = await authRequest("admin/users?page=1&per_page=1000", { headers });
+  const existing = (authUsers?.users ?? []).find((user: any) => String(user.email ?? "").trim().toLowerCase() === email);
+  const previous = existing ? await agentRest("panel_operators", { params: { select: "user_id,active", user_id: `eq.${existing.id}`, limit: "1" } }) : [];
+  if (previous?.[0]?.active) throw new UpstreamError("Este e-mail já pertence a um usuário ativo. Edite o cadastro existente.", 409);
+  const account = existing
+    ? await authRequest(`admin/users/${existing.id}`, { method: "PUT", headers, body: JSON.stringify({ password, email_confirm: true, user_metadata: { display_name: displayName } }) })
+    : await authRequest("admin/users", { method: "POST", headers, body: JSON.stringify({ email, password, email_confirm: true, user_metadata: { display_name: displayName } }) });
+  const userId = existing?.id ?? account?.id ?? account?.user?.id;
+  if (!userId || !uuid.test(userId)) throw new UpstreamError("Não foi possível identificar o usuário no Supabase Auth", 502);
+  const rows = await agentRest("panel_operators", { method: "POST", params: { on_conflict: "user_id", select: "user_id,display_name,role,active" }, body: { user_id: userId, display_name: displayName, role, active: true }, headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
+  if (teamIds.length) await agentRest("panel_team_members", { method: "POST", params: { on_conflict: "team_id,user_id" }, body: teamIds.map((teamId) => ({ team_id: teamId, user_id: userId, active: true })), headers: { Prefer: "resolution=merge-duplicates" } });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: existing ? "operator_reactivated_with_password" : "operator_created_with_password", details: { user_id: userId, role, team_ids: teamIds } } });
+  res.status(existing ? 200 : 201).json({ operator: rows?.[0], reactivated: Boolean(existing) });
+});
+router.put("/operators/:id/password", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const id = safeId(String(req.params.id));
+  if (id === req.operator!.user_id) throw new UpstreamError("Altere sua própria senha em Configurações", 409);
+  const password = String(req.body?.password ?? "");
+  if (password.length < 10 || password.length > 128) throw new UpstreamError("Use uma senha de 10 a 128 caracteres", 400);
+  const rows = await agentRest("panel_operators", { params: { select: "user_id,active", user_id: `eq.${id}`, limit: "1" } });
+  if (!rows?.[0]?.active) throw new UpstreamError("Usuário não encontrado ou removido", 404);
+  const key = config.agentKey();
+  await authRequest(`admin/users/${id}`, { method: "PUT", headers: { apikey: key, Authorization: `Bearer ${key}` }, body: JSON.stringify({ password, email_confirm: true }) });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_password_reset", details: { user_id: id } } });
+  res.json({ changed: true });
 });
 
 router.post("/operators/invite", async (req: AuthRequest, res) => {

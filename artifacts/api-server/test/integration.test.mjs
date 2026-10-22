@@ -28,6 +28,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let disconnected = false;
   let attendantRemoved = false;
   let invitationsSent = 0;
+  let createdWithPassword = 0;
+  let passwordUpdates = 0;
   let profileImageAvailable = true;
   let profileLookups = 0;
   let sessionPhone = '5562999999999@s.whatsapp.net';
@@ -37,6 +39,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     const json = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     if (url.pathname === '/auth/v1/token') {
       const body = JSON.parse(await new Response(req).text());
+      if (body.password === 'senha-incorreta') return json({ message: 'Invalid login credentials' }, 400);
       const attendant = body.email === 'attendant@example.test';
       return json({ access_token: attendant ? 'attendant-access' : 'test-access', refresh_token: 'test-refresh', expires_in: 3600 });
     }
@@ -44,8 +47,14 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       if (req.method === 'PUT') { const body = JSON.parse(await new Response(req).text()); assert.equal(body.password, 'senha-segura-123'); }
       return json({ id: req.headers.authorization === 'Bearer attendant-access' ? attendantId : userId });
     }
-    if (url.pathname === '/auth/v1/admin/users') return json({ users: [{ id: userId, email: 'admin@example.test', email_confirmed_at: '2026-10-01T00:00:00Z' }, { id: attendantId, email: 'attendant@example.test', invited_at: '2026-10-20T00:00:00Z', email_confirmed_at: attendantRemoved ? '2026-10-21T00:00:00Z' : null }] });
-    if (url.pathname === `/auth/v1/admin/users/${attendantId}`) return json({ id: attendantId, email: 'attendant@example.test', invited_at: '2026-10-20T00:00:00Z' });
+    if (url.pathname === '/auth/v1/admin/users') {
+      if (req.method === 'POST') { const body = JSON.parse(await new Response(req).text()); assert.equal(body.email_confirm, true); assert.equal(body.password, 'senha-inicial-123'); createdWithPassword++; return json({ id: invitedId, email: body.email }); }
+      return json({ users: [{ id: userId, email: 'admin@example.test', email_confirmed_at: '2026-10-01T00:00:00Z' }, { id: attendantId, email: 'attendant@example.test', invited_at: '2026-10-20T00:00:00Z', email_confirmed_at: attendantRemoved ? '2026-10-21T00:00:00Z' : null }] });
+    }
+    if (url.pathname === `/auth/v1/admin/users/${attendantId}` || url.pathname === `/auth/v1/admin/users/${userId}`) {
+      if (req.method === 'PUT') { const body = JSON.parse(await new Response(req).text()); assert.ok(body.password); passwordUpdates++; return json({ id: url.pathname.endsWith(attendantId) ? attendantId : userId }); }
+      return json({ id: url.pathname.endsWith(attendantId) ? attendantId : userId, email: url.pathname.endsWith(attendantId) ? 'attendant@example.test' : 'admin@example.test', invited_at: '2026-10-20T00:00:00Z' });
+    }
     if (url.pathname === '/auth/v1/invite') {
       invitationsSent++;
       const body = JSON.parse(await new Response(req).text());
@@ -151,10 +160,24 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(managed.operators.find((item) => item.user_id === attendantId).email_confirmed_at, null);
     const invite = await fetch(`${base}/operators/invite`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'novo@example.test', displayName: 'Novo Usuário', role: 'attendant', teamIds: [teamId] }) });
     assert.equal((await invite.json()).invitationSent, true);
+    const invitationsBeforeDirect = invitationsSent;
+    const direct = await fetch(`${base}/operators`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'direto@example.test', displayName: 'Direto', role: 'attendant', password: 'senha-inicial-123', teamIds: [teamId] }) });
+    assert.equal(direct.status, 201);
+    assert.equal((await direct.json()).operator.user_id, invitedId);
+    assert.equal(createdWithPassword, 1);
+    assert.equal(invitationsSent, invitationsBeforeDirect, 'Cadastro com senha não envia convite');
     const duplicate = await fetch(`${base}/operators/invite`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.test', displayName: 'Duplicado', role: 'admin' }) });
     assert.equal(duplicate.status, 409, 'Conta ativa não deve receber novo cadastro');
     const resend = await fetch(`${base}/operators/${attendantId}/resend-invite`, { method: 'POST', headers: { Cookie: cookie } });
     assert.equal((await resend.json()).sent, true);
+    const reset = await fetch(`${base}/operators/${attendantId}/password`, { method: 'PUT', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'senha-temporaria-123' }) });
+    assert.equal((await reset.json()).changed, true);
+    const invalidOld = await fetch(`${base}/auth/change-password`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ currentPassword: 'senha-incorreta', newPassword: 'outra-senha-123' }) });
+    assert.equal(invalidOld.status, 400);
+    const change = await fetch(`${base}/auth/change-password`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ currentPassword: 'test', newPassword: 'outra-senha-123' }) });
+    assert.equal((await change.json()).changed, true);
+    assert.match(change.headers.getSetCookie().join('; '), /eva_access=;/);
+    assert.equal(passwordUpdates, 2);
     const signature = await fetch(`${base}/operators/me`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ signature: 'Vilarinho' }) });
     assert.equal((await signature.json()).operator.signature, 'Vilarinho');
     const detail = await (await get(`/conversations/${sessionId}`)).json();
@@ -207,6 +230,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(attendantLogin.status, 200);
     const attendantCookie = attendantLogin.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
     const attendantGet = (path) => fetch(`${base}${path}`, { headers: { Cookie: attendantCookie } });
+    const forbiddenReset = await fetch(`${base}/operators/${userId}/password`, { method: 'PUT', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'senha-tentativa-123' }) });
+    assert.equal(forbiddenReset.status, 403, 'Atendente não pode definir senha de outro usuário');
     assert.equal((await (await attendantGet('/conversations')).json()).conversations.length, 2);
     assert.equal((await attendantGet(`/conversations/${sessionId}`)).status, 200);
     assert.equal((await fetch(`${base}/conversations/${sessionId}/claim`, { method: 'POST', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
@@ -222,6 +247,11 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.deepEqual(((await restore.json())), { operator: { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }, invitationSent: false, reactivated: true });
     assert.equal(invitationsSent, invitesBeforeRestore, 'Conta confirmada deve ser reativada sem novo convite');
     assert.equal((await attendantGet('/conversations')).status, 200, 'Conta reativada deve recuperar acesso com o mesmo ID');
+    assert.equal((await fetch(`${base}/operators/${attendantId}`, { method: 'DELETE', headers: { Cookie: cookie } })).status, 200);
+    const restoreWithPassword = await fetch(`${base}/operators`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'attendant@example.test', displayName: 'Outra Pessoa', role: 'attendant', password: 'nova-senha-inicial-123', teamIds: [teamId] }) });
+    assert.equal(restoreWithPassword.status, 200);
+    assert.equal((await restoreWithPassword.json()).reactivated, true);
+    assert.equal(invitationsSent, invitesBeforeRestore, 'Reativação com senha não envia convite');
     sessionPhone = '5562888888888@s.whatsapp.net';
     profileImageAvailable = false;
     const noPhoto = await get(`/conversations/${sessionId}/avatar?initials=CT`);

@@ -41,6 +41,7 @@ function App() {
   const [setup, setSetup] = useState<Setup | null>(null);
   const [operator, setOperator] = useState<Operator | null>(null);
   const [authError, setAuthError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [operators, setOperators] = useState<Operator[]>([]);
@@ -125,7 +126,7 @@ function App() {
   const evaCount = sessions.filter((session) => stateOf(session) === 'LIA ativa').length;
 
   async function login(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); setAuthError('');
+    event.preventDefault(); setBusy(true); setAuthError(''); setAuthNotice('');
     const form = new FormData(event.currentTarget);
     try { const result = await api<{ operator: Operator }>('/auth/login', { method: 'POST', body: { email: form.get('email'), password: form.get('password') } }); setOperator(result.operator); }
     catch (error) { setAuthError(error instanceof Error ? error.message : 'Falha ao entrar'); }
@@ -172,7 +173,7 @@ function App() {
   if (!setup) return <div className="live-gate"><AlertTriangle size={26} /><h1>API do painel indisponível</h1><p>{authError || 'Inicie o servidor da API para continuar.'}</p><button className="button button-primary" onClick={() => window.location.reload()}>Tentar novamente</button></div>;
   if (!setup.configured) return <div className="live-gate"><ShieldCheck size={30} /><h1>Integração aguardando configuração</h1><p>O painel não mostra dados de exemplo. Configure as variáveis abaixo no servidor para acessar a operação real.</p><div className="live-missing">{setup.missing.map((name) => <code key={name}>{name}</code>)}</div><p>Veja <code>artifacts/api-server/.env.example</code>. As chaves ficam apenas no servidor.</p><button className="button button-primary" onClick={() => window.location.reload()}>Verificar novamente</button></div>;
   if (inviteTokens) return <div className="live-gate"><span className="brand-mark"><span /><span /><span /></span><h1>Seu acesso ao Aluga Mais</h1><p>Crie uma senha para concluir o convite e entrar na plataforma.</p><form className="live-login" onSubmit={acceptInvite}><label>Nova senha<input name="password" type="password" minLength={10} maxLength={128} required autoComplete="new-password" /></label><label>Confirmar senha<input name="confirmPassword" type="password" minLength={10} maxLength={128} required autoComplete="new-password" /></label><button className="button button-primary" disabled={busy}>{busy ? 'Concluindo…' : 'Criar senha e entrar'}</button></form>{authError && <p className="live-error">{authError}</p>}</div>;
-  if (!operator) return <div className="live-gate"><span className="brand-mark"><span /><span /><span /></span><h1>Entrar no Aluga Mais</h1><p>Use uma conta do Supabase Auth autorizada como operador.</p><form className="live-login" onSubmit={login}><label>E-mail<input name="email" type="email" required autoComplete="username" /></label><label>Senha<input name="password" type="password" required autoComplete="current-password" /></label><button className="button button-primary" disabled={busy}>{busy ? 'Entrando…' : 'Entrar'}</button></form>{authError && <p className="live-error">{authError}</p>}</div>;
+  if (!operator) return <div className="live-gate"><span className="brand-mark"><span /><span /><span /></span><h1>Entrar no Aluga Mais</h1><p>Entre com o e-mail e a senha definidos para seu usuário.</p>{authNotice && <p role="status">{authNotice}</p>}<form className="live-login" onSubmit={login}><label>E-mail<input name="email" type="email" required autoComplete="username" /></label><label>Senha<input name="password" type="password" required autoComplete="current-password" /></label><button className="button button-primary" disabled={busy}>{busy ? 'Entrando…' : 'Entrar'}</button></form>{authError && <p className="live-error">{authError}</p>}</div>;
 
   return <div className="app-frame live-app">
     <aside className={`sidebar live-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}><div className="live-sidebar-header"><Link href="/" className="brand-lockup" aria-label="Aluga Mais"><span className="brand-mark"><span /><span /><span /></span><span><strong>Aluga Mais</strong><small>LOPES ALUGA · OPERAÇÃO</small></span></Link><button type="button" className="live-sidebar-toggle" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? 'Expandir menu lateral' : 'Recolher menu lateral'} title={sidebarCollapsed ? 'Expandir menu lateral' : 'Recolher menu lateral'} aria-expanded={!sidebarCollapsed}>{sidebarCollapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}</button></div><div className="side-label">ESPAÇO DE TRABALHO</div><div className="workspace-switch"><span className="workspace-bullet">L</span><span>Locação · Goiânia</span></div><nav className="side-nav" aria-label="Navegação principal">{navigation.filter((item) => operator.role !== 'attendant' || !['/alertas','/equipes'].includes(item.href)).map(({ href, label, icon: Icon }) => <Link href={href} key={href} className={`nav-link ${path === href ? 'active' : ''}`} aria-label={label} title={sidebarCollapsed ? label : undefined}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{href === '/fila-humana' && queueCount > 0 && <span className="nav-badge">{queueCount}</span>}</Link>)}</nav><div className="live-sidebar-foot"><span>{operator.display_name}<small>{operator.role}</small></span><button onClick={logout} title="Sair" aria-label="Sair"><LogOut size={18} /></button></div></aside>
@@ -187,7 +188,7 @@ function App() {
       {path === '/conhecimento' && <KnowledgeManager operator={operator} flash={flash} />}
       {path === '/equipes' && operator.role !== 'attendant' && <OperationsManager operator={operator} flash={flash} />}
       {path === '/chat-interno' && <InternalChat operator={operator} flash={flash} />}
-      {path === '/configuracoes' && <div className="live-settings-stack"><ProfileSettings operator={operator} routingReady={routingReady} onUpdate={setOperator} flash={flash} /><TagsManager flash={flash} onChange={refresh} /></div>}
+      {path === '/configuracoes' && <div className="live-settings-stack"><ProfileSettings operator={operator} routingReady={routingReady} onUpdate={setOperator} onPasswordChanged={() => { setOperator(null); setSessions([]); setDetail(null); setAuthNotice('Senha alterada. Entre novamente com a nova senha.'); navigate('/'); }} flash={flash} /><TagsManager flash={flash} onChange={refresh} /></div>}
       {!pageTitle[path] && <section className="live-card"><CircleHelp /><h2>Página não encontrada</h2><Link href="/">Voltar à visão geral</Link></section>}
       </div>
     </main>
@@ -200,9 +201,10 @@ function Metric({ label, value, icon: Icon, onClick }: { label: string; value: n
 function State({ value }: { value: string }) { return <span className={`live-state ${value === 'LIA ativa' ? 'ai' : value === 'Humano assumiu' ? 'human' : value === 'Aguardando atendimento' ? 'queue' : ''}`}>{value}</span>; }
 function Empty({ text }: { text: string }) { return <div className="live-empty">{text}</div>; }
 function ErrorLine({ text }: { text: string }) { return <div className="live-error"><AlertTriangle size={16} />{text}</div>; }
-function ProfileSettings({ operator, routingReady, onUpdate, flash }: { operator: Operator; routingReady: boolean; onUpdate: (operator: Operator) => void; flash: (message: string) => void }) {
+function ProfileSettings({ operator, routingReady, onUpdate, onPasswordChanged, flash }: { operator: Operator; routingReady: boolean; onUpdate: (operator: Operator) => void; onPasswordChanged: () => void; flash: (message: string) => void }) {
   const [signature, setSignature] = useState(operator.signature || operator.display_name);
   const [saving, setSaving] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
   useEffect(() => setSignature(operator.signature || operator.display_name), [operator.signature, operator.display_name]);
   async function save(event: FormEvent) {
     event.preventDefault(); setSaving(true);
@@ -210,6 +212,17 @@ function ProfileSettings({ operator, routingReady, onUpdate, flash }: { operator
     catch (issue) { flash(issue instanceof Error ? issue.message : 'Falha ao salvar assinatura'); }
     finally { setSaving(false); }
   }
-  return <section className="live-card live-profile-settings"><h2>Seu perfil de atendimento</h2><p>Essa assinatura aparece no WhatsApp antes de cada mensagem de texto que você enviar pelo painel. Sua foto continua restrita ao perfil interno.</p>{!routingReady && <p className="live-error">A configuração da assinatura ficará disponível após a migração do banco operacional.</p>}<form onSubmit={save}><label>Assinatura<input value={signature} maxLength={80} onChange={(event) => setSignature(event.target.value)} placeholder={operator.display_name} disabled={!routingReady} /></label><div className="live-signature-preview"><small>Prévia para o cliente</small><strong>{(signature.trim() || operator.display_name).replace(/:$/, '')}:</strong><span>Mensagem aqui</span></div><button className="button button-primary" disabled={saving || !routingReady}>{saving ? 'Salvando…' : 'Salvar assinatura'}</button></form></section>;
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    const currentPassword = String(values.get('currentPassword') ?? '');
+    const newPassword = String(values.get('newPassword') ?? '');
+    if (newPassword !== values.get('confirmPassword')) { flash('As senhas não são iguais.'); return; }
+    setChangingPassword(true);
+    try { await api('/auth/change-password', { method: 'POST', body: { currentPassword, newPassword } }); onPasswordChanged(); }
+    catch (issue) { flash(issue instanceof Error ? issue.message : 'Falha ao alterar senha'); }
+    finally { setChangingPassword(false); }
+  }
+  return <><section className="live-card live-profile-settings"><h2>Seu perfil de atendimento</h2><p>Essa assinatura aparece no WhatsApp antes de cada mensagem de texto que você enviar pelo painel. Sua foto continua restrita ao perfil interno.</p>{!routingReady && <p className="live-error">A configuração da assinatura ficará disponível após a migração do banco operacional.</p>}<form onSubmit={save}><label>Assinatura<input value={signature} maxLength={80} onChange={(event) => setSignature(event.target.value)} placeholder={operator.display_name} disabled={!routingReady} /></label><div className="live-signature-preview"><small>Prévia para o cliente</small><strong>{(signature.trim() || operator.display_name).replace(/:$/, '')}:</strong><span>Mensagem aqui</span></div><button className="button button-primary" disabled={saving || !routingReady}>{saving ? 'Salvando…' : 'Salvar assinatura'}</button></form></section><section className="live-card live-profile-settings"><h2>Alterar senha</h2><p>Confirme sua senha atual para definir uma nova. Após salvar, entre novamente.</p><form onSubmit={changePassword}><label>Senha atual<input name="currentPassword" type="password" required autoComplete="current-password" /></label><label>Nova senha<input name="newPassword" type="password" required minLength={10} maxLength={128} autoComplete="new-password" /></label><label>Confirmar nova senha<input name="confirmPassword" type="password" required minLength={10} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" disabled={changingPassword}>{changingPassword ? 'Alterando…' : 'Alterar senha'}</button></form></section></>;
 }
 export default App;
