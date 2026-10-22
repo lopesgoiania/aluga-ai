@@ -1,13 +1,22 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Archive, ArrowRight, BookOpen, Check, FileText, Lightbulb, Pencil, Plus, Search, ShieldCheck, Upload, X } from 'lucide-react';
+import { Archive, ArrowRight, BookOpen, Check, FileText, Lightbulb, Pencil, Plus, Search, ShieldCheck, Upload, X, MessageCircle, Building2, Users, AlertTriangle, ExternalLink } from 'lucide-react';
 import { api, dateTime, type Operator } from './services/api';
+import policySnapshot from './lia-policy-snapshot.json';
 
 type Audience = 'all' | 'inquilino' | 'proprietario' | 'corretor';
 type Status = 'draft' | 'approved' | 'archived';
 type Entry = { id: string; title: string; content: string; status: Status; audience: Audience; scope: string; source_type: string; source_path?: string | null; version: number; updated_at: string; approved_at?: string | null };
 type Suggestion = { id: string; session_id?: string; suggested_title: string; suggested_content: string; created_at: string };
 type Gap = { id: string; session_id?: string; question: string; reason: string; created_at: string };
-type View = 'library' | 'gaps' | 'suggestions';
+type View = 'guide' | 'library' | 'gaps' | 'suggestions';
+type Channel = { id: string; display_name: string; instance_name: string; purpose?: string | null; instructions?: string | null; default_team_id?: string | null; ai_enabled: boolean; active: boolean };
+type Team = { id: string; name: string; ai_enabled: boolean; active: boolean };
+const guideSections = [
+  { title: 'Conversa e qualificação', icon: MessageCircle, points: ['Saúda com naturalidade e entende a intenção pelo contexto; não começa perguntando se a pessoa é inquilina, proprietária ou corretora.', 'Não repete critérios já informados, evita formato de formulário e faz no máximo uma pergunta útil por vez.', 'Responde em mensagens breves, sem forçar assunto imobiliário quando a pessoa só cumprimenta.'] },
+  { title: 'Busca de imóveis', icon: Building2, points: ['Para quem procura alugar, inicia a busca assim que recebe um critério útil, sem pedir autorização.', 'Usa imóveis reais do catálogo; não inventa anúncios, preços nem disponibilidade.', 'Um pedido por galpão acima de 100 m² em Goiânia, sem bairro definido, já permite pesquisar.'] },
+  { title: 'Parceria com corretores', icon: Users, points: ['Distingue o cliente que procura locação do proprietário que quer anunciar; não busca imóveis como se o corretor fosse o interessado.', 'Na indicação de locatário, orienta consultar o site e enviar link do anúncio, nome e contato do cliente. Comissão: 25% do primeiro aluguel se a locação for concluída e o aluguel recebido.', 'Na captação de proprietário, pede contato e dados suficientes para identificar o imóvel, sem exigir todos os campos. Comissão: 40% do primeiro aluguel se o imóvel entrar na carteira, for alugado e o aluguel recebido.', 'Com os dados essenciais da indicação, registra e encaminha à equipe. A Lopes assume os procedimentos da locação.'] },
+  { title: 'Segurança e transferência', icon: ShieldCheck, points: ['Só afirma condições, valores, prazos e procedimentos respaldados pelas regras fixas, por conhecimento aprovado, pelo catálogo ou pelo próprio cliente.', 'Quando falta fonte para uma resposta factual, registra a lacuna e transfere a conversa para uma pessoa, sem inventar resposta.', 'Também transfere a pedido do cliente, diante de irritação, negociação sensível ou caso que exija decisão humana.'] },
+];
 const audiences: { value: Audience; label: string }[] = [
   { value: 'all', label: 'Todos os públicos' },
   { value: 'inquilino', label: 'Inquilinos' },
@@ -23,10 +32,15 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
   const [entries, setEntries] = useState<Entry[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [gaps, setGaps] = useState<Gap[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [operationsLoading, setOperationsLoading] = useState(true);
+  const [teamsLoaded, setTeamsLoaded] = useState(false);
+  const [operationsError, setOperationsError] = useState('');
   const [audienceEnabled, setAudienceEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
-  const [view, setView] = useState<View>('library');
+  const [view, setView] = useState<View>('guide');
   const [audienceFilter, setAudienceFilter] = useState<Audience | 'any'>('any');
   const [statusFilter, setStatusFilter] = useState<Status | 'active'>('active');
   const [query, setQuery] = useState('');
@@ -50,6 +64,12 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
     setLoadError(''); setLoading(false);
   };
   useEffect(() => { void load().catch((error) => { setLoadError(error instanceof Error ? error.message : 'Não foi possível carregar os conhecimentos.'); setLoading(false); }); }, []);
+  useEffect(() => { void Promise.allSettled([api<{ channels: Channel[] }>('/channels'), api<{ teams: Team[] }>('/teams')]).then(([channelResult, teamResult]) => {
+    if (channelResult.status === 'fulfilled') setChannels(channelResult.value.channels);
+    if (teamResult.status === 'fulfilled') { setTeams(teamResult.value.teams); setTeamsLoaded(true); }
+    if (channelResult.status === 'rejected' || teamResult.status === 'rejected') setOperationsError('Não foi possível conferir as configurações dos canais e equipes agora.');
+    setOperationsLoading(false);
+  }); }, []);
 
   const counts = useMemo(() => ({
     approved: entries.filter((entry) => entry.status === 'approved').length,
@@ -114,7 +134,7 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
 
   return <div className="knowledge-workspace">
     <header className="knowledge-header">
-      <div><h2>Conhecimento da LIA</h2><p>Veja o que orienta as respostas, trate dúvidas sem fonte e aprove novas informações com segurança.</p></div>
+      <div><h2>O que a LIA sabe e como atende</h2><p>Regras do fluxo, orientações dos canais e informações aprovadas em um só lugar — com a origem de cada uma.</p></div>
       {canEdit && <div className="knowledge-header-actions"><button type="button" className="button button-outline" onClick={() => openEditor('document')}><Upload size={15} /> Anexar documento</button><button type="button" className="button button-primary" onClick={() => openEditor('text')}><Plus size={16} /> Nova informação</button></div>}
     </header>
 
@@ -140,10 +160,27 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
     <div className="knowledge-layout">
       <section className="knowledge-main" aria-label="Biblioteca de conhecimento">
         <nav className="knowledge-tabs" aria-label="Áreas do conhecimento">
+          <button type="button" className={view === 'guide' ? 'active' : ''} onClick={() => setView('guide')} aria-current={view === 'guide' ? 'page' : undefined}><ShieldCheck size={17} /> Como atende</button>
           <button type="button" className={view === 'library' ? 'active' : ''} onClick={() => setView('library')} aria-current={view === 'library' ? 'page' : undefined}><BookOpen size={17} /> Biblioteca</button>
           {canEdit && <button type="button" className={view === 'gaps' ? 'active' : ''} onClick={() => setView('gaps')} aria-current={view === 'gaps' ? 'page' : undefined}><Lightbulb size={17} /> Lacunas <span>{gaps.length}</span></button>}
           {canEdit && <button type="button" className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')} aria-current={view === 'suggestions' ? 'page' : undefined}><FileText size={17} /> Sugestões <span>{suggestions.length}</span></button>}
         </nav>
+
+        {view === 'guide' && <div className="knowledge-guide">
+          <div className="knowledge-panel-intro"><h3>Regras já definidas para a LIA</h3><p>Este retrato vem do último fluxo do agente exportado no projeto. Ele mostra regras gravadas no workflow; a publicação atual do n8n precisa ser conferida separadamente após cada alteração.</p></div>
+          <div className="knowledge-guide-rules">{guideSections.map(({ title: sectionTitle, icon: Icon, points }) => <section className="knowledge-guide-section" key={sectionTitle}><div className="knowledge-guide-section-title"><Icon size={18} /><h4>{sectionTitle}</h4></div><ul>{points.map((point) => <li key={point}>{point}</li>)}</ul></section>)}</div>
+          <section className="knowledge-guide-gap"><AlertTriangle size={19} /><div><strong>Pontos que ainda precisam ser alinhados no fluxo</strong><p>O atendimento ao proprietário direto não tem um roteiro completo: a captação detalhada atual trata do caso em que um corretor traz o proprietário. Além disso, o texto do último fluxo exportado ainda apresenta a assistente como “Eva”; o nome atual da plataforma é LIA. Esses pontos estão identificados aqui, não como comportamento já corrigido.</p></div></section>
+          <details className="knowledge-policy-source"><summary>Ver instruções completas do fluxo exportado <span>versão {policySnapshot.sourceSha256}</span></summary><p>Fonte: {policySnapshot.source}. Este texto é uma cópia local para auditoria, não uma leitura em tempo real do n8n.</p><pre>{policySnapshot.instructions}</pre></details>
+          <div className="knowledge-panel-intro knowledge-guide-channels-head"><h3>Orientações por canal</h3><p>Estas configurações vêm do banco agora. Só fazem parte do atendimento se a LIA estiver habilitada no canal e na equipe responsável.</p></div>
+          {operationsError && <div className="knowledge-notice" role="status">{operationsError}</div>}
+          {operationsLoading ? <div className="knowledge-empty">Carregando configurações dos canais…</div> : channels.length ? <div className="knowledge-channel-list">{channels.map((channel) => {
+            const team = teams.find((item) => item.id === channel.default_team_id);
+            const enabled = channel.active && channel.ai_enabled && Boolean(team?.active && team.ai_enabled);
+            const status = !channel.active || !channel.ai_enabled ? 'LIA não habilitada' : !teamsLoaded ? 'Equipe não verificada' : enabled ? 'LIA habilitada' : 'LIA não habilitada';
+            return <article key={channel.id} className="knowledge-channel"><div className="knowledge-channel-head"><strong>{channel.display_name}</strong><span className={enabled ? 'enabled' : ''}>{status}</span></div><small>{channel.instance_name}{team ? ` · Equipe ${team.name}` : teamsLoaded ? ' · Sem equipe identificada' : ' · Equipe não verificada'}</small><p><b>Finalidade:</b> {channel.purpose?.trim() || 'Não informada'}</p><p><b>Instruções adicionais:</b> {channel.instructions?.trim() || 'Nenhuma cadastrada'}</p></article>;
+          })}</div> : !operationsError && <div className="knowledge-empty"><strong>Nenhum canal configurado apareceu nesta consulta</strong><p>As regras gerais acima e a biblioteca aprovada continuam separadas das instruções específicas de cada número.</p></div>}
+          <div className="knowledge-guide-footer"><span>Informações aprovadas e documentos ficam na Biblioteca; rascunhos não orientam respostas.</span><button type="button" className="button button-outline" onClick={() => setView('library')}>Abrir biblioteca <ExternalLink size={14} /></button></div>
+        </div>}
 
         {view === 'library' && <>
           <div className="knowledge-toolbar"><label className="knowledge-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar título ou conteúdo" aria-label="Buscar conhecimentos" /></label><select value={audienceFilter} onChange={(event) => setAudienceFilter(event.target.value as Audience | 'any')} aria-label="Filtrar por público"><option value="any">Qualquer público</option>{audiences.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as Status | 'active')} aria-label="Filtrar por situação"><option value="active">Ativos e em revisão</option><option value="approved">Aprovados</option><option value="draft">Em revisão</option><option value="archived">Arquivados ({counts.archived})</option></select></div>
@@ -153,7 +190,7 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
             {expanded === entry.id && <div className="knowledge-entry-detail"><p>{entry.content}</p><div className="knowledge-entry-meta"><span>Fonte: {entry.source_type === 'document' ? 'documento anexado' : entry.source_type === 'conversation' ? 'atendimento revisado' : 'cadastro manual'}</span><span>Aplicação: {audienceLabel(entry.audience)}</span><span>{entry.status === 'approved' ? `Aprovado em ${dateTime(entry.approved_at ?? undefined)}` : statusLabel[entry.status]}</span></div>
               {canEdit && <div className="knowledge-entry-actions">{entry.source_type === 'document' && entry.source_path && <a className="button button-outline" href={`/api/knowledge/${entry.id}/document`} target="_blank" rel="noreferrer">Ver documento</a>}<button type="button" className="button button-outline" disabled={busy} onClick={() => openEditor('text', entry)}><Pencil size={14} /> Editar</button>{entry.status !== 'approved' && <button type="button" className="button button-primary" disabled={busy} onClick={() => void change(entry, 'approve')}><Check size={14} /> Aprovar</button>}{entry.status !== 'archived' && <button type="button" className="button button-outline" disabled={busy} onClick={() => void change(entry, 'archive')}><Archive size={14} /> Arquivar</button>}</div>}
             </div>}
-          </article>)}</div> : <div className="knowledge-empty"><BookOpen size={23} /><strong>{entries.length ? 'Nenhum resultado com esses filtros' : 'A biblioteca ainda está vazia'}</strong><p>{entries.length ? 'Ajuste o público, a situação ou a busca.' : 'Cadastre uma informação confirmada para começar a orientar a LIA.'}</p>{canEdit && !entries.length && <button type="button" className="button button-primary" onClick={() => openEditor('text')}>Criar primeira informação</button>}</div>}
+          </article>)}</div> : <div className="knowledge-empty"><BookOpen size={23} /><strong>{entries.length ? 'Nenhum resultado com esses filtros' : 'Nenhuma informação cadastrada nesta biblioteca'}</strong><p>{entries.length ? 'Ajuste o público, a situação ou a busca.' : 'As regras fixas do fluxo continuam na aba Como atende. Cadastre aqui fatos e procedimentos que devem ser consultados e revisados no painel.'}</p>{canEdit && !entries.length && <button type="button" className="button button-primary" onClick={() => openEditor('text')}>Criar primeira informação</button>}</div>}
           <p className="knowledge-list-caption">Mostrando até 200 conteúdos mais recentes. Só os aprovados entram na consulta da LIA.</p>
         </>}
 
