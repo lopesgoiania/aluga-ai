@@ -10,7 +10,7 @@ type Props = {
   setSelectedId: (id: string) => void; showList: boolean; setShowList: (value: boolean) => void;
   search: string; setSearch: (value: string) => void; busy: boolean; setBusy: (value: boolean) => void;
   refresh: () => Promise<void>; refreshDetail: (id: string) => Promise<void>;
-  action: (kind: 'assume' | 'resume_ai' | 'close_session') => Promise<void>;
+  action: (kind: 'assume' | 'resume_ai' | 'close_session', historyReviewed?: boolean) => Promise<void>;
   flash: (message: string) => void; humanQueue: boolean; error?: string;
 };
 
@@ -149,10 +149,11 @@ export default function Inbox(props: Props) {
 
   async function route(target: 'new' | 'operator' | 'eva' | 'team', targetId?: string) {
     if (!selected) return;
-    if (target === 'eva' && needsHistoryReview(selected) && !window.confirm('Esta conversa pode ter um histórico anterior no WhatsApp que a LIA não conhece. Você revisou o contexto e quer ativar a LIA mesmo assim?')) return;
+    const historyReviewed = target === 'eva' && needsHistoryReview(selected);
+    if (historyReviewed && !window.confirm('Esta conversa pode ter um histórico anterior no WhatsApp que a LIA não conhece. Você revisou o contexto e quer ativar a LIA mesmo assim?')) return;
     setBusy(true); setTransferOpen(false);
     try {
-      await api(`/conversations/${selected.id}/route`, { method: 'POST', body: { target, targetUserId: target === 'operator' ? targetId : null, teamId: target === 'team' ? targetId : null } });
+      await api(`/conversations/${selected.id}/route`, { method: 'POST', body: { target, targetUserId: target === 'operator' ? targetId : null, teamId: target === 'team' ? targetId : null, historyReviewed } });
       await Promise.all([refresh(), refreshDetail(selected.id)]);
       flash(target === 'new' ? 'Conversa devolvida para Novos. LIA pausada.' : target === 'eva' ? 'Conversa devolvida à LIA.' : target === 'team' ? 'Conversa encaminhada à equipe. LIA pausada.' : 'Conversa atribuída ao atendente.');
       if (target === 'new') setCategory('new');
@@ -307,7 +308,7 @@ export default function Inbox(props: Props) {
               <span className="live-composer-hint">Enter envia · Shift+Enter pula linha</span><button type={reply.trim() ? 'submit' : 'button'} className="live-icon-button primary" disabled={busy} title={reply.trim() ? 'Enviar mensagem' : 'Gravar áudio'} aria-label={reply.trim() ? 'Enviar mensagem' : 'Gravar áudio'} onClick={reply.trim() ? undefined : () => void startRecording()}>{reply.trim() ? <Send size={18} /> : <Mic size={19} />}</button>
             </div></form>}
           </div>
-          {stateOf(selected) === 'Humano assumiu' && <div className="live-session-actions"><button className="live-resume-button" disabled={busy || recording} onClick={() => { if (!needsHistoryReview(selected) || window.confirm('O histórico anterior do WhatsApp ainda não foi verificado. Você revisou o contexto e quer devolver esta conversa à LIA?')) void action('resume_ai'); }}><Sparkles size={15} /> Devolver à LIA</button><button className="live-close-button" disabled={busy || recording} onClick={() => void action('close_session')}><Square size={14} /> Encerrar atendimento</button></div>}
+          {stateOf(selected) === 'Humano assumiu' && <div className="live-session-actions"><button className="live-resume-button" disabled={busy || recording} onClick={() => { const historyReviewed = needsHistoryReview(selected); if (!historyReviewed || window.confirm('O histórico anterior do WhatsApp ainda não foi verificado. Você revisou o contexto e quer devolver esta conversa à LIA?')) void action('resume_ai', historyReviewed); }}><Sparkles size={15} /> Devolver à LIA</button><button className="live-close-button" disabled={busy || recording} onClick={() => void action('close_session')}><Square size={14} /> Encerrar atendimento</button></div>}
         </>}
       </div></> : <div className="live-empty">Selecione uma conversa.</div>}
     </section>

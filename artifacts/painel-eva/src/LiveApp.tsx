@@ -145,11 +145,11 @@ function App() {
     finally { setBusy(false); }
   }
   async function logout() { await api('/auth/logout', { method: 'POST' }).catch(() => undefined); setOperator(null); setSessions([]); setDetail(null); navigate('/'); }
-  async function action(kind: 'assume' | 'resume_ai' | 'close_session') {
+  async function action(kind: 'assume' | 'resume_ai' | 'close_session', historyReviewed = false) {
     if (!selected) return;
     setBusy(true);
     try {
-      await api(`/conversations/${selected.id}/${kind === 'assume' ? 'assume' : 'finish'}`, { method: 'POST', body: kind === 'assume' ? {} : { outcome: kind } });
+      await api(`/conversations/${selected.id}/${kind === 'assume' ? 'assume' : 'finish'}`, { method: 'POST', body: kind === 'assume' ? {} : { outcome: kind, historyReviewed } });
       await Promise.all([refresh(), refreshDetail(selected.id)]);
       flash(kind === 'assume' ? 'Conversa assumida. LIA pausada.' : kind === 'resume_ai' ? 'Conversa devolvida à LIA.' : 'Conversa encerrada.');
     } catch (error) { flash(error instanceof Error ? error.message : 'Ação não concluída'); }

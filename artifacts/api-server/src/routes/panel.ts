@@ -605,6 +605,7 @@ router.post("/conversations/:id/route", async (req: AuthRequest, res) => {
   if (!["new", "operator", "eva", "team"].includes(target) || (target === "operator") !== Boolean(targetUserId) || (target === "team") !== Boolean(teamId)) throw new UpstreamError("Destino inválido", 400);
   const session = await sessionFor(req, String(req.params.id));
   if (target === "eva") {
+    if (session.metadata?.ai_admission === "unverified" && req.body?.historyReviewed !== true) throw new UpstreamError("Revise o contexto anterior antes de ativar a LIA nesta conversa", 409);
     if (!session.channel_id || !session.assigned_team_id) throw new UpstreamError("Defina a equipe responsável antes de ativar a LIA", 409);
     const [channels, teams] = await Promise.all([
       agentRest("panel_channels", { params: { select: "id", id: `eq.${session.channel_id}`, default_team_id: `eq.${session.assigned_team_id}`, ai_enabled: "eq.true", active: "eq.true", limit: "1" } }),
@@ -764,7 +765,9 @@ router.post("/conversations/:id/claim", async (req: AuthRequest, res) => {
 router.post("/conversations/:id/finish", async (req: AuthRequest, res) => {
   const outcome = req.body?.outcome;
   if (outcome !== "resume_ai" && outcome !== "close_session") throw new UpstreamError("Ação inválida", 400);
-  const result = await agentRpc("panel_finish_session", { p_session_id: safeId(req.params.id as string), p_operator_id: req.operator!.user_id, p_outcome: outcome });
+  const session = await sessionFor(req, String(req.params.id));
+  if (outcome === "resume_ai" && session.metadata?.ai_admission === "unverified" && req.body?.historyReviewed !== true) throw new UpstreamError("Revise o contexto anterior antes de devolver esta conversa à LIA", 409);
+  const result = await agentRpc("panel_finish_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_outcome: outcome });
   res.json(result);
 });
 router.post("/conversations/:id/reply", async (req: AuthRequest, res) => {
