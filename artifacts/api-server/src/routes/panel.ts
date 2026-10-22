@@ -207,7 +207,7 @@ router.get("/knowledge/suggestions", async (req: AuthRequest, res) => {
   res.json({ suggestions });
 });
 router.post("/knowledge/suggestions/:id/review", async (req: AuthRequest, res) => {
-  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  roleAllowed(req.operator!, ["admin"]);
   if (typeof req.body?.accept !== "boolean") throw new UpstreamError("Informe se aceita a sugestão", 400);
   const result = await agentRpc("panel_review_knowledge_suggestion", { p_suggestion_id: safeId(String(req.params.id)), p_operator_id: req.operator!.user_id, p_accept: req.body.accept });
   res.json(result);
