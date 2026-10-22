@@ -14,6 +14,8 @@ const contactId = '33333333-3333-4333-8333-333333333333';
 const outboundId = '66666666-6666-4666-8666-666666666666';
 const mediaId = '88888888-8888-4888-8888-888888888888';
 const teamId = '99999999-9999-4999-8999-999999999999';
+const otherTeamId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const otherSessionId = '77777777-7777-4777-8777-777777777777';
 const invitedId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 const listen = (server) => new Promise((resolvePort) => server.listen(0, '127.0.0.1', () => resolvePort(server.address().port)));
@@ -76,9 +78,9 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     }
     if (url.pathname === '/rest/v1/chat_sessions') {
       const rows = [
-      { id: sessionId, channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', contact_id: contactId, phone: sessionPhone, status: 'atendimento_humano', ai_enabled: false, created_at: '2026-10-02T12:00:00Z' },
+      { id: sessionId, assigned_team_id: teamId, channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', contact_id: contactId, phone: sessionPhone, status: 'atendimento_humano', ai_enabled: false, created_at: '2026-10-02T12:00:00Z' },
       { id: reviewSessionId, channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', assigned_team_id: teamId, contact_id: contactId, phone: sessionPhone, status: 'novo', ai_enabled: false, metadata: { ai_admission: 'unverified' }, created_at: '2026-10-22T12:00:00Z' },
-      { id: '77777777-7777-4777-8777-777777777777', channel_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', contact_id: contactId, phone: '5562999999999@s.whatsapp.net', status: 'qualificando', ai_enabled: true, created_at: '2026-09-20T12:00:00Z' },
+      { id: otherSessionId, assigned_team_id: otherTeamId, channel_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', contact_id: contactId, phone: '5562999999999@s.whatsapp.net', status: 'qualificando', ai_enabled: true, created_at: '2026-09-20T12:00:00Z' },
       ]; return json(url.searchParams.has('id') ? rows.filter((row) => row.id === url.searchParams.get('id')?.slice(3)) : rows);
     }
     if (url.pathname === '/rest/v1/contacts') return json([{ id: contactId, name: 'Cliente Teste', phone: '5562999999999', metadata: {} }]);
@@ -100,7 +102,11 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       if (req.method === 'PATCH') return json([{ id: teamId, name: 'Comercial', ai_enabled: true, active: true }]);
       return json([{ id: teamId, name: 'Comercial', ai_enabled: false, active: true }]);
     }
-    if (url.pathname === '/rest/v1/panel_team_members') return json(req.method === 'POST' ? [{ team_id: teamId, user_id: invitedId, active: true }] : []);
+    if (url.pathname === '/rest/v1/panel_team_members') {
+      if (req.method === 'POST') { const body = JSON.parse(await new Response(req).text()); return json(Array.isArray(body) ? body : [body]); }
+      if (url.searchParams.get('user_id') === `eq.${attendantId}`) return json(url.searchParams.get('team_id') === `eq.${otherTeamId}` ? [] : [{ team_id: teamId, user_id: attendantId, active: true }]);
+      return json([]);
+    }
     if (url.pathname === '/rest/v1/panel_internal_messages') {
       if (req.method === 'POST') {
         const body = JSON.parse(await new Response(req).text());
@@ -208,6 +214,9 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     const managed = await (await get('/operators/manage')).json();
     assert.equal(managed.operators.find((item) => item.user_id === attendantId).email, 'attendant@example.test');
     assert.equal(managed.operators.find((item) => item.user_id === attendantId).email_confirmed_at, null);
+    const assignTeams = await fetch(`${base}/operators/${attendantId}/teams`, { method: 'PUT', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ teamIds: [teamId] }) });
+    assert.equal(assignTeams.status, 200);
+    assert.deepEqual((await assignTeams.json()).teamIds, [teamId]);
     const invite = await fetch(`${base}/operators/invite`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'novo@example.test', displayName: 'Novo Usuário', role: 'attendant', teamIds: [teamId] }) });
     assert.equal((await invite.json()).invitationSent, true);
     const invitationsBeforeDirect = invitationsSent;
@@ -268,8 +277,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     const transfer = await fetch(`${base}/conversations/${sessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'operator', targetUserId: attendantId }) });
     assert.equal((await transfer.json()).target, 'operator');
     assert.equal(routedTarget, 'operator');
-    const evaWithoutTeam = await fetch(`${base}/conversations/${sessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'eva' }) });
-    assert.equal(evaWithoutTeam.status, 409, 'Eva só pode receber atendimento de uma equipe configurada');
+    const evaWithTeam = await fetch(`${base}/conversations/${sessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'eva' }) });
+    assert.equal(evaWithTeam.status, 200, 'LIA pode receber atendimento de uma equipe configurada');
     const unreviewed = await fetch(`${base}/conversations/${reviewSessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'eva' }) });
     assert.equal(unreviewed.status, 409);
     const reviewed = await fetch(`${base}/conversations/${reviewSessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'eva', historyReviewed: true }) });
@@ -286,12 +295,15 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(attendantLogin.status, 200);
     const attendantCookie = attendantLogin.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
     const attendantGet = (path) => fetch(`${base}${path}`, { headers: { Cookie: attendantCookie } });
-    assert.equal((await attendantGet(`/internal/media/${mediaId}`)).status, 403, 'Áudio de equipe só pode ser ouvido por membro autorizado');
-    assert.equal((await post('/internal/messages', { teamId, body: 'Sem acesso' }, attendantCookie)).status, 403);
+    assert.equal((await attendantGet(`/internal/media/${mediaId}`)).status, 200, 'Membro da equipe pode ouvir o áudio interno');
+    assert.equal((await post('/internal/messages', { teamId: otherTeamId, body: 'Sem acesso' }, attendantCookie)).status, 403);
     assert.equal((await attendantGet('/knowledge/gaps')).status, 403, 'Lacunas de conhecimento exigem supervisor ou administrador');
     const forbiddenReset = await fetch(`${base}/operators/${userId}/password`, { method: 'PUT', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'senha-tentativa-123' }) });
     assert.equal(forbiddenReset.status, 403, 'Atendente não pode definir senha de outro usuário');
-    assert.equal((await (await attendantGet('/conversations')).json()).conversations.length, 2);
+    assert.equal((await (await attendantGet('/conversations')).json()).conversations.length, 1, 'Atendente vê só conversas das equipes atribuídas');
+    assert.equal((await attendantGet(`/conversations/${otherSessionId}`)).status, 403);
+    assert.equal((await post(`/conversations/${otherSessionId}/reply`, { text: 'Não posso enviar' }, attendantCookie)).status, 403);
+    assert.equal((await fetch(`${base}/operators/${attendantId}/teams`, { method: 'PUT', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ teamIds: [otherTeamId] }) })).status, 403);
     assert.equal((await attendantGet(`/conversations/${sessionId}`)).status, 200);
     assert.equal((await fetch(`${base}/conversations/${sessionId}/claim`, { method: 'POST', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
     assert.equal((await attendantGet('/alerts')).status, 403);

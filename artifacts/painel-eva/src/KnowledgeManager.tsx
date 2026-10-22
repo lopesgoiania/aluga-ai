@@ -29,6 +29,7 @@ const fileBase64 = (file: File) => new Promise<string>((resolve, reject) => { co
 
 export default function KnowledgeManager({ operator, flash }: { operator: Operator; flash: (message: string) => void }) {
   const canEdit = operator.role === 'admin' || operator.role === 'supervisor';
+  const canReviewCases = operator.role === 'admin';
   const [entries, setEntries] = useState<Entry[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [gaps, setGaps] = useState<Gap[]>([]);
@@ -56,8 +57,8 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
   const load = async () => {
     const [library, pending, unanswered] = await Promise.all([
       api<{ entries: Entry[]; audienceEnabled: boolean }>('/knowledge'),
-      canEdit ? api<{ suggestions: Suggestion[] }>('/knowledge/suggestions') : Promise.resolve({ suggestions: [] }),
-      canEdit ? api<{ gaps: Gap[] }>('/knowledge/gaps') : Promise.resolve({ gaps: [] }),
+      canReviewCases ? api<{ suggestions: Suggestion[] }>('/knowledge/suggestions') : Promise.resolve({ suggestions: [] }),
+      canReviewCases ? api<{ gaps: Gap[] }>('/knowledge/gaps') : Promise.resolve({ gaps: [] }),
     ]);
     setEntries(library.entries); setAudienceEnabled(library.audienceEnabled);
     setSuggestions(pending.suggestions); setGaps(unanswered.gaps);
@@ -144,8 +145,8 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
     <div className="knowledge-status-bar" aria-label="Estado da base">
       <span><strong>{counts.approved}</strong> aprovados <small>podem orientar a LIA</small></span>
       <span><strong>{counts.draft}</strong> em revisão <small>ainda não usados</small></span>
-      {canEdit && <span><strong>{gaps.length}</strong> dúvidas sem fonte <small>nos eventos recentes</small></span>}
-      {canEdit && <span><strong>{suggestions.length}</strong> sugestões <small>aguardam análise</small></span>}
+      {canReviewCases && <span><strong>{gaps.length}</strong> dúvidas sem fonte <small>nos eventos recentes</small></span>}
+      {canReviewCases && <span><strong>{suggestions.length}</strong> sugestões <small>aguardam análise</small></span>}
     </div>
 
     {editor && canEdit && <section id="knowledge-editor" className="knowledge-editor" aria-label={editing ? 'Editar conhecimento' : 'Novo conhecimento'}>
@@ -162,8 +163,8 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
         <nav className="knowledge-tabs" aria-label="Áreas do conhecimento">
           <button type="button" className={view === 'guide' ? 'active' : ''} onClick={() => setView('guide')} aria-current={view === 'guide' ? 'page' : undefined}><ShieldCheck size={17} /> Como atende</button>
           <button type="button" className={view === 'library' ? 'active' : ''} onClick={() => setView('library')} aria-current={view === 'library' ? 'page' : undefined}><BookOpen size={17} /> Biblioteca</button>
-          {canEdit && <button type="button" className={view === 'gaps' ? 'active' : ''} onClick={() => setView('gaps')} aria-current={view === 'gaps' ? 'page' : undefined}><Lightbulb size={17} /> Lacunas <span>{gaps.length}</span></button>}
-          {canEdit && <button type="button" className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')} aria-current={view === 'suggestions' ? 'page' : undefined}><FileText size={17} /> Sugestões <span>{suggestions.length}</span></button>}
+          {canReviewCases && <button type="button" className={view === 'gaps' ? 'active' : ''} onClick={() => setView('gaps')} aria-current={view === 'gaps' ? 'page' : undefined}><Lightbulb size={17} /> Lacunas <span>{gaps.length}</span></button>}
+          {canReviewCases && <button type="button" className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')} aria-current={view === 'suggestions' ? 'page' : undefined}><FileText size={17} /> Sugestões <span>{suggestions.length}</span></button>}
         </nav>
 
         {view === 'guide' && <div className="knowledge-guide">
@@ -194,9 +195,9 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
           <p className="knowledge-list-caption">Mostrando até 200 conteúdos mais recentes. Só os aprovados entram na consulta da LIA.</p>
         </>}
 
-        {view === 'gaps' && canEdit && <div className="knowledge-panel"><div className="knowledge-panel-intro"><h3>Perguntas que pediram ajuda humana</h3><p>Casos recentes marcados como falta de conhecimento. Revise a pergunta antes de criar uma resposta oficial.</p></div>{gaps.length ? gaps.map((gap) => <article className="knowledge-case" key={gap.id}><span className="knowledge-case-mark"><Lightbulb size={17} /></span><div><strong>{gap.question || 'Pergunta não registrada no evento'}</strong><p>{gap.reason}</p><small>{dateTime(gap.created_at)}</small></div><button type="button" className="button button-outline" onClick={() => draftFromGap(gap)}>Criar rascunho <ArrowRight size={14} /></button></article>) : <div className="knowledge-empty"><ShieldCheck size={23} /><strong>Nenhuma lacuna registrada nos eventos recentes</strong><p>Continue revisando os atendimentos: isso não significa que todas as perguntas já estejam cobertas.</p></div>}</div>}
+        {view === 'gaps' && canReviewCases && <div className="knowledge-panel"><div className="knowledge-panel-intro"><h3>Perguntas que pediram ajuda humana</h3><p>Casos recentes marcados como falta de conhecimento. Revise a pergunta antes de criar uma resposta oficial.</p></div>{gaps.length ? gaps.map((gap) => <article className="knowledge-case" key={gap.id}><span className="knowledge-case-mark"><Lightbulb size={17} /></span><div><strong>{gap.question || 'Pergunta não registrada no evento'}</strong><p>{gap.reason}</p><small>{dateTime(gap.created_at)}</small></div><button type="button" className="button button-outline" onClick={() => draftFromGap(gap)}>Criar rascunho <ArrowRight size={14} /></button></article>) : <div className="knowledge-empty"><ShieldCheck size={23} /><strong>Nenhuma lacuna registrada nos eventos recentes</strong><p>Continue revisando os atendimentos: isso não significa que todas as perguntas já estejam cobertas.</p></div>}</div>}
 
-        {view === 'suggestions' && canEdit && <div className="knowledge-panel"><div className="knowledge-panel-intro"><h3>Ideias extraídas de atendimentos</h3><p>Uma sugestão aceita vira rascunho. Nenhuma resposta humana passa a orientar a LIA sem revisão e aprovação.</p></div>{suggestions.length ? suggestions.map((suggestion) => <article className="knowledge-suggestion" key={suggestion.id}><strong>{suggestion.suggested_title}</strong><p>{suggestion.suggested_content}</p><small>{dateTime(suggestion.created_at)}</small><div className="knowledge-entry-actions"><button type="button" className="button button-primary" disabled={busy} onClick={() => void review(suggestion, true)}>Revisar como rascunho</button><button type="button" className="button button-outline" disabled={busy} onClick={() => void review(suggestion, false)}>Descartar</button></div></article>) : <div className="knowledge-empty"><Lightbulb size={23} /><strong>Sem sugestões pendentes</strong><p>Quando a análise de atendimentos encontrar algo útil, ele aparecerá aqui para revisão.</p></div>}</div>}
+        {view === 'suggestions' && canReviewCases && <div className="knowledge-panel"><div className="knowledge-panel-intro"><h3>Ideias extraídas de atendimentos</h3><p>Uma sugestão aceita vira rascunho. Nenhuma resposta humana passa a orientar a LIA sem revisão e aprovação.</p></div>{suggestions.length ? suggestions.map((suggestion) => <article className="knowledge-suggestion" key={suggestion.id}><strong>{suggestion.suggested_title}</strong><p>{suggestion.suggested_content}</p><small>{dateTime(suggestion.created_at)}</small><div className="knowledge-entry-actions"><button type="button" className="button button-primary" disabled={busy} onClick={() => void review(suggestion, true)}>Revisar como rascunho</button><button type="button" className="button button-outline" disabled={busy} onClick={() => void review(suggestion, false)}>Descartar</button></div></article>) : <div className="knowledge-empty"><Lightbulb size={23} /><strong>Sem sugestões pendentes</strong><p>Quando a análise de atendimentos encontrar algo útil, ele aparecerá aqui para revisão.</p></div>}</div>}
       </section>
 
       <aside className="knowledge-aside" aria-label="Funcionamento e limites da LIA"><div className="knowledge-aside-head"><ShieldCheck size={18} /><h3>Como a LIA usa esta base</h3></div><ol><li><strong>Rascunho</strong><span>Você registra e revisa a informação.</span></li><li><strong>Aprovação</strong><span>O conteúdo passa a poder ser consultado.</span></li><li><strong>Resposta</strong><span>A LIA só recebe entradas aprovadas e relevantes à pergunta.</span></li></ol><div className="knowledge-aside-divider" /><h4>Limites do fluxo atual</h4><p>Sem fonte confirmada para uma pergunta factual, o atendimento deve seguir para uma pessoa da equipe.</p><p>Um PDF anexado não é interpretado automaticamente. Transcreva os fatos antes de aprovar.</p><p>Conteúdos por público dependem da identificação do perfil na conversa; revise os primeiros atendimentos após publicar uma regra.</p></aside>

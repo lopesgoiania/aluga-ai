@@ -80,13 +80,12 @@ const roleAllowed = (operator: Operator, roles: Operator["role"][]) => {
   if (!roles.includes(operator.role)) throw new UpstreamError("Sem permissão para esta ação", 403);
 };
 async function teamIdsFor(operator: Operator): Promise<Set<string>> {
-  if (operator.role !== "attendant") return new Set();
-  const rows = await agentRest("panel_team_members", { params: { select: "team_id", user_id: `eq.${operator.user_id}`, active: "eq.true" } }).catch(() => []);
+  if (operator.role === "admin") return new Set();
+  const rows = await agentRest("panel_team_members", { params: { select: "team_id", user_id: `eq.${operator.user_id}`, active: "eq.true" } });
   return new Set((rows as any[]).map((row) => row.team_id));
 }
-const visibleTo = (operator: Operator, session: any, handoff: any, teamIds: Set<string>) =>
-  operator.role !== "attendant" || handoff?.assigned_to === operator.display_name
-  || !session.assigned_team_id || teamIds.has(session.assigned_team_id);
+const visibleTo = (operator: Operator, session: any, _handoff: any, teamIds: Set<string>) =>
+  operator.role === "admin" || (Boolean(session.assigned_team_id) && teamIds.has(session.assigned_team_id));
 const signedReply = (operator: Operator, message: string) => {
   const raw = String(operator.signature || operator.display_name).replace(/[\r\n*]/g, " ").trim().slice(0, 80).replace(/:$/, "");
   return `*${raw}:*\n${message}`;
@@ -193,7 +192,7 @@ router.get("/knowledge", async (_req, res) => {
   }
 });
 router.get("/knowledge/gaps", async (req: AuthRequest, res) => {
-  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  roleAllowed(req.operator!, ["admin"]);
   const events = await agentRest("agent_events", { params: { select: "id,session_id,created_at,payload", event_type: "eq.agent_decision", order: "created_at.desc", limit: "200" } });
   const gaps = (events as any[]).filter((event) => event.payload?.knowledge_gap === true).slice(0, 30).map((event) => ({
     id: event.id, session_id: event.session_id, created_at: event.created_at,
@@ -203,7 +202,7 @@ router.get("/knowledge/gaps", async (req: AuthRequest, res) => {
   res.json({ gaps });
 });
 router.get("/knowledge/suggestions", async (req: AuthRequest, res) => {
-  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  roleAllowed(req.operator!, ["admin"]);
   const suggestions = await agentRest("agent_knowledge_suggestions", { params: { select: "id,session_id,suggested_title,suggested_content,created_at", status: "eq.pending", order: "created_at.desc", limit: "100" } });
   res.json({ suggestions });
 });
@@ -318,6 +317,9 @@ router.delete("/tags/:id", async (req: AuthRequest, res) => {
 });
 router.put("/contacts/:contactId/tags/:tagId", async (req: AuthRequest, res) => {
   const contactId = safeId(String(req.params.contactId));
+  const sessions = await agentRest("chat_sessions", { params: { select: "id,assigned_team_id", contact_id: `eq.${contactId}`, order: "created_at.desc", limit: "100" } });
+  const teamIds = await teamIdsFor(req.operator!);
+  if (!(sessions as any[]).some((session) => visibleTo(req.operator!, session, null, teamIds))) throw new UpstreamError("Contato não autorizado", 403);
   const tagId = safeId(String(req.params.tagId));
   const enabled = req.body?.enabled;
   if (typeof enabled !== "boolean") throw new UpstreamError("Informe se a etiqueta deve estar ativa", 400);
@@ -482,6 +484,28 @@ router.patch("/operators/:id", async (req: AuthRequest, res) => {
   await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_updated", details: { user_id: id, changes } } });
   res.json({ operator: rows[0] });
 });
+router.put("/operators/:id/teams", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const userId = safeId(String(req.params.id));
+  const teamIds = req.body?.teamIds;
+  if (!Array.isArray(teamIds) || teamIds.length > 20 || teamIds.some((id) => typeof id !== "string" || !uuid.test(id)) || new Set(teamIds).size !== teamIds.length) throw new UpstreamError("Equipes inválidas", 400);
+  const [users, teams, members] = await Promise.all([
+    agentRest("panel_operators", { params: { select: "user_id", user_id: `eq.${userId}`, active: "eq.true", limit: "1" } }),
+    agentRest("panel_teams", { params: { select: "id", active: "eq.true" } }),
+    agentRest("panel_team_members", { params: { select: "team_id,active", user_id: `eq.${userId}` } }),
+  ]);
+  if (!users.length) throw new UpstreamError("Usuário não encontrado", 404);
+  const activeIds = new Set((teams as any[]).map((team) => team.id));
+  if (teamIds.some((id) => !activeIds.has(id))) throw new UpstreamError("Uma equipe selecionada não está disponível", 409);
+  const desired = new Set(teamIds);
+  const existing = new Map((members as any[]).map((member) => [member.team_id, member.active]));
+  const changes = [...new Set([...existing.keys(), ...desired])].filter((id) => desired.has(id) !== Boolean(existing.get(id)));
+  for (const teamId of changes) {
+    await agentRest("panel_team_members", { method: "POST", params: { on_conflict: "team_id,user_id" }, body: { team_id: teamId, user_id: userId, active: desired.has(teamId) }, headers: { Prefer: "resolution=merge-duplicates" } });
+  }
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_team_access_set", details: { user_id: userId, team_ids: teamIds, changed_team_ids: changes } } });
+  res.json({ teamIds });
+});
 router.get("/teams", async (_req, res) => {
   const [teams, members] = await Promise.all([
     agentRest("panel_teams", { params: { select: "id,name,description,ai_enabled,active,created_at", order: "name.asc" } }),
@@ -523,12 +547,18 @@ router.delete("/teams/:id", async (req: AuthRequest, res) => {
   res.json({ archived: true });
 });
 router.put("/teams/:id/members/:userId", async (req: AuthRequest, res) => {
-  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  roleAllowed(req.operator!, ["admin"]);
   const teamId = safeId(String(req.params.id));
   const userId = safeId(String(req.params.userId));
   const active = req.body?.active;
   if (typeof active !== "boolean") throw new UpstreamError("Informe active", 400);
+  const [teams, users] = await Promise.all([
+    agentRest("panel_teams", { params: { select: "id", id: `eq.${teamId}`, active: "eq.true", limit: "1" } }),
+    agentRest("panel_operators", { params: { select: "user_id", user_id: `eq.${userId}`, active: "eq.true", limit: "1" } }),
+  ]);
+  if (!teams.length || !users.length) throw new UpstreamError("Equipe ou usuário indisponível", 404);
   const rows = await agentRest("panel_team_members", { method: "POST", params: { on_conflict: "team_id,user_id", select: "*" }, body: { team_id: teamId, user_id: userId, active }, headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "operator_team_access_changed", details: { user_id: userId, team_id: teamId, active } } });
   res.json({ member: rows[0] });
 });
 async function teamAccess(operator: Operator, teamId: string, requireActive = false) {
@@ -536,7 +566,7 @@ async function teamAccess(operator: Operator, teamId: string, requireActive = fa
     const teams = await agentRest("panel_teams", { params: { select: "id", id: `eq.${teamId}`, active: "eq.true", limit: "1" } });
     if (!teams?.length) throw new UpstreamError("Equipe indisponível para novas mensagens", 404);
   }
-  if (["admin", "supervisor"].includes(operator.role)) return;
+  if (operator.role === "admin") return;
   const members = await agentRest("panel_team_members", { params: { select: "team_id", team_id: `eq.${teamId}`, user_id: `eq.${operator.user_id}`, active: "eq.true", limit: "1" } });
   if (!members?.length) throw new UpstreamError("Você não participa desta equipe", 403);
 }
@@ -546,11 +576,11 @@ router.get("/internal/directory", async (_req: AuthRequest, res) => {
 });
 router.get("/internal/conversations", async (req: AuthRequest, res) => {
   const myId = req.operator!.user_id;
-  const teams = req.operator!.role === "attendant"
+  const teams = req.operator!.role !== "admin"
     ? await agentRest("panel_team_members", { params: { select: "team_id", user_id: `eq.${myId}`, active: "eq.true" } })
     : await agentRest("panel_teams", { params: { select: "id" } });
   const ids = (teams as Array<{ team_id?: string; id?: string }>).map((row) => row.team_id ?? row.id).filter(Boolean) as string[];
-  const filter = [`sender_user_id.eq.${myId}`, `recipient_user_id.eq.${myId}`, ...(ids.length ? [`team_id.in.(${ids.join(",")})`] : [])].join(",");
+  const filter = [`and(team_id.is.null,sender_user_id.eq.${myId})`, `and(team_id.is.null,recipient_user_id.eq.${myId})`, ...(ids.length ? [`team_id.in.(${ids.join(",")})`] : [])].join(",");
   const rows = await agentRest("panel_internal_messages", { params: { select: "id,team_id,recipient_user_id,sender_user_id,body,created_at,media_mime_type", or: `(${filter})`, order: "created_at.desc", limit: "500" } });
   const latest = new Map<string, unknown>();
   for (const row of rows as any[]) {
@@ -634,7 +664,9 @@ router.get("/internal/media/:id", async (req: AuthRequest, res) => {
 });
 
 router.get("/conversations", async (req: AuthRequest, res) => {
-  const recent = await agentRest("chat_sessions", { params: { select: "*", order: "created_at.desc", limit: "500" } });
+  const teamIds = await teamIdsFor(req.operator!);
+  if (req.operator!.role !== "admin" && !teamIds.size) { res.json({ conversations: [] }); return; }
+  const recent = await agentRest("chat_sessions", { params: { select: "*", ...(req.operator!.role === "admin" ? {} : { assigned_team_id: `in.(${[...teamIds].join(",")})` }), order: "created_at.desc", limit: "500" } });
   const byContact = new Map<string, any>();
   for (const session of recent as any[]) {
     const key = `${String(session.contact_id ?? session.phone ?? session.id)}:${String(session.channel_id ?? "legacy")}`;
@@ -663,7 +695,6 @@ router.get("/conversations", async (req: AuthRequest, res) => {
   const channelBySession = new Map<string, string>();
   for (const item of recentMessages as any[]) if (!channelBySession.has(item.session_id) && typeof item.metadata?.instance === "string") channelBySession.set(item.session_id, item.metadata.instance);
   const answeredByLIA = new Set((recentMessages as any[]).filter((item) => item.direction === "outbound" && item.sender_type === "ai").map((item) => item.session_id));
-  const teamIds = await teamIdsFor(req.operator!);
   res.json({ conversations: sessions.filter((session) => visibleTo(req.operator!, session, handoffBySession.get(session.id), teamIds)).map((session) => ({ ...session, initial_new: !answeredByLIA.has(session.id), channel: channelBySession.get(session.id) ?? config.instance(), contact: contactById.get(session.contact_id) ?? null, handoff: handoffBySession.get(session.id) ?? null, tags: tagsByContact.get(session.contact_id) ?? [] })) });
 });
 
@@ -673,6 +704,14 @@ router.post("/conversations/:id/route", async (req: AuthRequest, res) => {
   const teamId = req.body?.teamId == null ? null : safeId(String(req.body.teamId));
   if (!["new", "operator", "eva", "team"].includes(target) || (target === "operator") !== Boolean(targetUserId) || (target === "team") !== Boolean(teamId)) throw new UpstreamError("Destino inválido", 400);
   const session = await sessionFor(req, String(req.params.id));
+  if (target === "operator") {
+    const users = await agentRest("panel_operators", { params: { select: "user_id,role", user_id: `eq.${targetUserId}`, active: "eq.true", limit: "1" } });
+    const recipient = users?.[0];
+    if (!recipient) throw new UpstreamError("Atendente indisponível", 404);
+    if (recipient.role !== "admin" && (!session.assigned_team_id || !(await teamIdsFor({ ...req.operator!, user_id: targetUserId!, role: recipient.role })).has(session.assigned_team_id))) {
+      throw new UpstreamError("O atendente precisa ter acesso à equipe desta conversa", 409);
+    }
+  }
   if (target === "eva") {
     if (session.metadata?.ai_admission === "unverified" && req.body?.historyReviewed !== true) throw new UpstreamError("Revise o contexto anterior antes de ativar a LIA nesta conversa", 409);
     if (!session.channel_id || !session.assigned_team_id) throw new UpstreamError("Defina a equipe responsável antes de ativar a LIA", 409);
@@ -811,7 +850,8 @@ router.post("/conversations/:id/assist", async (req: AuthRequest, res) => {
 });
 
 router.post("/conversations/:id/assume", async (req: AuthRequest, res) => {
-  const result = await agentRpc("panel_assume_session", { p_session_id: safeId(req.params.id as string), p_operator_id: req.operator!.user_id });
+  const session = await sessionFor(req, String(req.params.id));
+  const result = await agentRpc("panel_assume_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id });
   res.json(result);
 });
 router.post("/conversations/:id/claim", async (req: AuthRequest, res) => {
@@ -853,6 +893,7 @@ router.post("/conversations/:id/finish", async (req: AuthRequest, res) => {
 });
 router.post("/conversations/:id/reply", async (req: AuthRequest, res) => {
   const sessionId = safeId(req.params.id as string);
+  await sessionFor(req, sessionId);
   const draft = String(req.body?.text ?? "").trim();
   const text = signedReply(req.operator!, draft);
   const requestKey = safeId(String(req.body?.requestKey ?? randomUUID()));
@@ -876,6 +917,7 @@ router.post("/conversations/:id/reply", async (req: AuthRequest, res) => {
 
 router.post("/conversations/:id/audio", async (req: AuthRequest, res) => {
   const sessionId = safeId(String(req.params.id));
+  await sessionFor(req, sessionId);
   const requestKey = safeId(String(req.body?.requestKey ?? randomUUID()));
   const mime = String(req.body?.mimeType ?? "").split(";")[0].toLowerCase();
   const audio = String(req.body?.base64 ?? "");
@@ -902,6 +944,7 @@ router.post("/conversations/:id/audio", async (req: AuthRequest, res) => {
 
 router.post("/conversations/:id/file", async (req: AuthRequest, res) => {
   const sessionId = safeId(String(req.params.id));
+  await sessionFor(req, sessionId);
   const requestKey = safeId(String(req.body?.requestKey ?? randomUUID()));
   const kind = String(req.body?.kind ?? "");
   const mime = String(req.body?.mimeType ?? "").split(";")[0].toLowerCase();
@@ -1012,7 +1055,7 @@ router.get("/connection/qr", async (req: AuthRequest, res) => {
   res.json({ instance: config.instance(), data: await evolution(`/instance/connect/${encodeURIComponent(config.instance())}`) });
 });
 router.get("/alerts", async (req: AuthRequest, res) => {
-  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  roleAllowed(req.operator!, ["admin"]);
   const [events, outbound] = await Promise.all([
     agentRest("agent_events", { params: { select: "id,session_id,event_type,tool_name,success,error_message,created_at", success: "eq.false", order: "created_at.desc", limit: "100" } }),
     agentRest("panel_outbound", { params: { select: "id,session_id,operator_id,body,status,provider_message_id,created_at", status: "in.(reserved,uncertain)", order: "created_at.desc", limit: "100" } }),
