@@ -684,7 +684,9 @@ router.post("/conversations/:id/route", async (req: AuthRequest, res) => {
   }
   const result = target === "team"
     ? await agentRpc("panel_route_to_team", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_team_id: teamId })
-    : await agentRpc("panel_route_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_target: target, p_target_user_id: targetUserId });
+    : target === "eva" && session.metadata?.ai_admission === "unverified"
+      ? await agentRpc("panel_release_review_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id })
+      : await agentRpc("panel_route_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_target: target, p_target_user_id: targetUserId });
   res.json(result);
 });
 
@@ -835,8 +837,18 @@ router.post("/conversations/:id/finish", async (req: AuthRequest, res) => {
   const outcome = req.body?.outcome;
   if (outcome !== "resume_ai" && outcome !== "close_session") throw new UpstreamError("Ação inválida", 400);
   const session = await sessionFor(req, String(req.params.id));
-  if (outcome === "resume_ai" && session.metadata?.ai_admission === "unverified" && req.body?.historyReviewed !== true) throw new UpstreamError("Revise o contexto anterior antes de devolver esta conversa à LIA", 409);
-  const result = await agentRpc("panel_finish_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_outcome: outcome });
+  if (outcome === "resume_ai") {
+    if (session.metadata?.ai_admission === "unverified" && req.body?.historyReviewed !== true) throw new UpstreamError("Revise o contexto anterior antes de devolver esta conversa à LIA", 409);
+    if (!session.channel_id || !session.assigned_team_id) throw new UpstreamError("Defina a equipe responsável antes de ativar a LIA", 409);
+    const [channels, teams] = await Promise.all([
+      agentRest("panel_channels", { params: { select: "id", id: `eq.${session.channel_id}`, default_team_id: `eq.${session.assigned_team_id}`, ai_enabled: "eq.true", active: "eq.true", limit: "1" } }),
+      agentRest("panel_teams", { params: { select: "id", id: `eq.${session.assigned_team_id}`, ai_enabled: "eq.true", active: "eq.true", limit: "1" } }),
+    ]);
+    if (!channels.length || !teams.length) throw new UpstreamError("Ative a LIA na equipe e no canal antes de devolver esta conversa", 409);
+  }
+  const result = outcome === "resume_ai" && session.metadata?.ai_admission === "unverified"
+    ? await agentRpc("panel_release_review_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id })
+    : await agentRpc("panel_finish_session", { p_session_id: session.id, p_operator_id: req.operator!.user_id, p_outcome: outcome });
   res.json(result);
 });
 router.post("/conversations/:id/reply", async (req: AuthRequest, res) => {

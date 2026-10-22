@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const sessionId = '11111111-1111-4111-8111-111111111111';
+const reviewSessionId = '12121212-1212-4121-8121-121212121212';
 const userId = '22222222-2222-4222-8222-222222222222';
 const attendantId = '55555555-5555-4555-8555-555555555555';
 const contactId = '33333333-3333-4333-8333-333333333333';
@@ -73,10 +74,13 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       if (!url.searchParams.has('user_id')) return json([{ user_id: userId, display_name: 'Operador Teste', role: 'admin', active: true }, { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }]);
       return json(url.searchParams.get('user_id') === `eq.${attendantId}` ? [{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }] : [{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true }]);
     }
-    if (url.pathname === '/rest/v1/chat_sessions') return json([
+    if (url.pathname === '/rest/v1/chat_sessions') {
+      const rows = [
       { id: sessionId, channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', contact_id: contactId, phone: sessionPhone, status: 'atendimento_humano', ai_enabled: false, created_at: '2026-10-02T12:00:00Z' },
+      { id: reviewSessionId, channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', assigned_team_id: teamId, contact_id: contactId, phone: sessionPhone, status: 'novo', ai_enabled: false, metadata: { ai_admission: 'unverified' }, created_at: '2026-10-22T12:00:00Z' },
       { id: '77777777-7777-4777-8777-777777777777', channel_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', contact_id: contactId, phone: '5562999999999@s.whatsapp.net', status: 'qualificando', ai_enabled: true, created_at: '2026-09-20T12:00:00Z' },
-    ]);
+      ]; return json(url.searchParams.has('id') ? rows.filter((row) => row.id === url.searchParams.get('id')?.slice(3)) : rows);
+    }
     if (url.pathname === '/rest/v1/contacts') return json([{ id: contactId, name: 'Cliente Teste', phone: '5562999999999', metadata: {} }]);
     if (url.pathname === '/rest/v1/human_handoffs') {
       if (req.method === 'GET' && url.searchParams.has('assigned_to')) return json([]);
@@ -142,6 +146,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     }
     if (url.pathname === '/rest/v1/rpc/panel_confirm_outbound') return json({ status: 'sent', provider_message_id: 'WA-1' });
     if (url.pathname === '/rest/v1/rpc/panel_route_session') { const body = JSON.parse(await new Response(req).text()); routedTarget = body.p_target; return json({ target: routedTarget, assigned_to: 'Outra Pessoa' }); }
+    if (url.pathname === '/rest/v1/rpc/panel_release_review_session') { routedTarget = 'reviewed_eva'; return json({ target: 'eva', reply_expected: true, pending: 1 }); }
     if (url.pathname === '/rest/v1/rpc/panel_reconcile_outbound') return json({ status: 'failed' });
     if (url.pathname === '/message/sendText/Teste') { sentText = JSON.parse(await new Response(req).text()).text; sends++; return json({ key: { id: 'WA-1' } }); }
     if (url.pathname === '/message/sendWhatsAppAudio/Teste') { sends++; return json({ key: { id: 'WA-AUDIO-1' } }); }
@@ -265,6 +270,12 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(routedTarget, 'operator');
     const evaWithoutTeam = await fetch(`${base}/conversations/${sessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'eva' }) });
     assert.equal(evaWithoutTeam.status, 409, 'Eva só pode receber atendimento de uma equipe configurada');
+    const unreviewed = await fetch(`${base}/conversations/${reviewSessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'eva' }) });
+    assert.equal(unreviewed.status, 409);
+    const reviewed = await fetch(`${base}/conversations/${reviewSessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'eva', historyReviewed: true }) });
+    assert.equal(reviewed.status, 200);
+    assert.equal((await reviewed.json()).reply_expected, true);
+    assert.equal(routedTarget, 'reviewed_eva');
     const audio = await fetch(`${base}/conversations/${sessionId}/audio`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ requestKey: '99999999-9999-4999-8999-999999999999', mimeType: 'audio/ogg', base64: Buffer.from('recording').toString('base64') }) });
     assert.equal((await audio.json()).status, 'sent');
     assert.equal(sends, 2);

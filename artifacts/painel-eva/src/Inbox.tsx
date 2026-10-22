@@ -153,9 +153,9 @@ export default function Inbox(props: Props) {
     if (historyReviewed && !window.confirm('Esta conversa pode ter um histórico anterior no WhatsApp que a LIA não conhece. Você revisou o contexto e quer ativar a LIA mesmo assim?')) return;
     setBusy(true); setTransferOpen(false);
     try {
-      await api(`/conversations/${selected.id}/route`, { method: 'POST', body: { target, targetUserId: target === 'operator' ? targetId : null, teamId: target === 'team' ? targetId : null, historyReviewed } });
+      const result = await api<{ reply_expected?: boolean }>(`/conversations/${selected.id}/route`, { method: 'POST', body: { target, targetUserId: target === 'operator' ? targetId : null, teamId: target === 'team' ? targetId : null, historyReviewed } });
       await Promise.all([refresh(), refreshDetail(selected.id)]);
-      flash(target === 'new' ? 'Conversa devolvida para Novos. LIA pausada.' : target === 'eva' ? 'Conversa devolvida à LIA.' : target === 'team' ? 'Conversa encaminhada à equipe. LIA pausada.' : 'Conversa atribuída ao atendente.');
+      flash(target === 'new' ? 'Conversa devolvida para Novos. LIA pausada.' : target === 'eva' ? result.reply_expected ? 'LIA liberada. As mensagens pendentes serão retomadas em instantes.' : 'LIA liberada para as próximas mensagens.' : target === 'team' ? 'Conversa encaminhada à equipe. LIA pausada.' : 'Conversa atribuída ao atendente.');
       if (target === 'new') setCategory('new');
       else if (target === 'operator' && targetId === operator.user_id) setCategory('mine');
       else setCategory('others');
