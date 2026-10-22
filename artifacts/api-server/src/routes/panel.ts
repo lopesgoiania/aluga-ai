@@ -531,23 +531,48 @@ router.put("/teams/:id/members/:userId", async (req: AuthRequest, res) => {
   const rows = await agentRest("panel_team_members", { method: "POST", params: { on_conflict: "team_id,user_id", select: "*" }, body: { team_id: teamId, user_id: userId, active }, headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
   res.json({ member: rows[0] });
 });
-async function teamAccess(operator: Operator, teamId: string) {
+async function teamAccess(operator: Operator, teamId: string, requireActive = false) {
+  if (requireActive) {
+    const teams = await agentRest("panel_teams", { params: { select: "id", id: `eq.${teamId}`, active: "eq.true", limit: "1" } });
+    if (!teams?.length) throw new UpstreamError("Equipe indisponível para novas mensagens", 404);
+  }
   if (["admin", "supervisor"].includes(operator.role)) return;
   const members = await agentRest("panel_team_members", { params: { select: "team_id", team_id: `eq.${teamId}`, user_id: `eq.${operator.user_id}`, active: "eq.true", limit: "1" } });
   if (!members?.length) throw new UpstreamError("Você não participa desta equipe", 403);
 }
+router.get("/internal/directory", async (_req: AuthRequest, res) => {
+  const operators = await agentRest("panel_operators", { params: { select: "user_id,display_name,role,active", order: "display_name.asc" } });
+  res.json({ operators });
+});
+router.get("/internal/conversations", async (req: AuthRequest, res) => {
+  const myId = req.operator!.user_id;
+  const teams = req.operator!.role === "attendant"
+    ? await agentRest("panel_team_members", { params: { select: "team_id", user_id: `eq.${myId}`, active: "eq.true" } })
+    : await agentRest("panel_teams", { params: { select: "id" } });
+  const ids = (teams as Array<{ team_id?: string; id?: string }>).map((row) => row.team_id ?? row.id).filter(Boolean) as string[];
+  const filter = [`sender_user_id.eq.${myId}`, `recipient_user_id.eq.${myId}`, ...(ids.length ? [`team_id.in.(${ids.join(",")})`] : [])].join(",");
+  const rows = await agentRest("panel_internal_messages", { params: { select: "id,team_id,recipient_user_id,sender_user_id,body,created_at,media_mime_type", or: `(${filter})`, order: "created_at.desc", limit: "500" } });
+  const latest = new Map<string, unknown>();
+  for (const row of rows as any[]) {
+    const key = row.team_id ? `team:${row.team_id}` : `peer:${row.sender_user_id === myId ? row.recipient_user_id : row.sender_user_id}`;
+    if (!latest.has(key)) latest.set(key, row);
+  }
+  res.json({ latest: Object.fromEntries(latest) });
+});
 router.get("/internal/messages", async (req: AuthRequest, res) => {
   const teamId = req.query.teamId ? safeId(String(req.query.teamId)) : null;
   const peerId = req.query.peerId ? safeId(String(req.query.peerId)) : null;
+  const before = req.query.before ? String(req.query.before) : null;
+  if (before && (!Number.isFinite(Date.parse(before)) || before.length > 35)) throw new UpstreamError("Data de paginação inválida", 400);
   if (Boolean(teamId) === Boolean(peerId)) throw new UpstreamError("Escolha uma equipe ou um usuário", 400);
   if (teamId) {
     await teamAccess(req.operator!, teamId);
-    const messages = await agentRest("panel_internal_messages", { params: { select: "*", team_id: `eq.${teamId}`, order: "created_at.desc", limit: "100" } });
-    res.json({ messages: messages.reverse() }); return;
+    const messages = await agentRest("panel_internal_messages", { params: { select: "*", team_id: `eq.${teamId}`, ...(before ? { created_at: `lt.${before}` } : {}), order: "created_at.desc", limit: "51" } });
+    res.json({ messages: messages.slice(0, 50).reverse(), hasMore: messages.length > 50 }); return;
   }
   const myId = req.operator!.user_id;
-  const messages = await agentRest("panel_internal_messages", { params: { select: "*", or: `(and(sender_user_id.eq.${myId},recipient_user_id.eq.${peerId}),and(sender_user_id.eq.${peerId},recipient_user_id.eq.${myId}))`, order: "created_at.desc", limit: "100" } });
-  res.json({ messages: messages.reverse() });
+  const messages = await agentRest("panel_internal_messages", { params: { select: "*", or: `(and(sender_user_id.eq.${myId},recipient_user_id.eq.${peerId}),and(sender_user_id.eq.${peerId},recipient_user_id.eq.${myId}))`, ...(before ? { created_at: `lt.${before}` } : {}), order: "created_at.desc", limit: "51" } });
+  res.json({ messages: messages.slice(0, 50).reverse(), hasMore: messages.length > 50 });
 });
 router.post("/internal/messages", async (req: AuthRequest, res) => {
   const teamId = req.body?.teamId ? safeId(String(req.body.teamId)) : null;
@@ -555,13 +580,57 @@ router.post("/internal/messages", async (req: AuthRequest, res) => {
   const body = String(req.body?.body ?? "").trim();
   const sessionId = req.body?.sessionId ? safeId(String(req.body.sessionId)) : null;
   if (Boolean(teamId) === Boolean(recipientUserId) || !body || body.length > 5000) throw new UpstreamError("Destinatário ou mensagem inválidos", 400);
-  if (teamId) await teamAccess(req.operator!, teamId);
+  if (sessionId) await sessionFor(req, sessionId);
+  if (teamId) await teamAccess(req.operator!, teamId, true);
   if (recipientUserId) {
     const operators = await agentRest("panel_operators", { params: { select: "user_id", user_id: `eq.${recipientUserId}`, active: "eq.true", limit: "1" } });
     if (!operators?.length) throw new UpstreamError("Destinatário indisponível", 404);
   }
   const rows = await agentRest("panel_internal_messages", { method: "POST", params: { select: "*" }, body: { sender_user_id: req.operator!.user_id, team_id: teamId, recipient_user_id: recipientUserId, session_id: sessionId, body }, headers: { Prefer: "return=representation" } });
   res.status(201).json({ message: rows[0] });
+});
+
+router.post("/internal/audio", async (req: AuthRequest, res) => {
+  const teamId = req.body?.teamId ? safeId(String(req.body.teamId)) : null;
+  const recipientUserId = req.body?.recipientUserId ? safeId(String(req.body.recipientUserId)) : null;
+  const mime = String(req.body?.mimeType ?? "").split(";")[0].toLowerCase();
+  const raw = String(req.body?.base64 ?? "");
+  const duration = Math.round(Number(req.body?.durationSeconds ?? 0));
+  if (Boolean(teamId) === Boolean(recipientUserId) || !["audio/ogg", "audio/webm", "audio/mp4", "audio/mpeg"].includes(mime) || !raw || raw.length > 4_200_000 || !/^[A-Za-z0-9+/=]+$/.test(raw) || !Number.isFinite(duration) || duration < 1 || duration > 600) throw new UpstreamError("Áudio inválido ou maior que 3 MB", 400);
+  if (teamId) await teamAccess(req.operator!, teamId, true);
+  if (recipientUserId) {
+    const users = await agentRest("panel_operators", { params: { select: "user_id", user_id: `eq.${recipientUserId}`, active: "eq.true", limit: "1" } });
+    if (!users?.length) throw new UpstreamError("Destinatário indisponível", 404);
+  }
+  const bytes = Buffer.from(raw, "base64");
+  if (!bytes.length || bytes.length > 3 * 1024 * 1024) throw new UpstreamError("Áudio maior que 3 MB", 413);
+  const extension = mime === "audio/ogg" ? "ogg" : mime === "audio/mp4" ? "m4a" : mime === "audio/mpeg" ? "mp3" : "webm";
+  const path = `${randomUUID()}.${extension}`;
+  const storageUrl = `${config.agentUrl()}/storage/v1/object/aluga-internal-chat/${path}`;
+  const uploaded = await fetch(storageUrl, { method: "POST", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}`, "Content-Type": mime }, body: new Uint8Array(bytes), signal: AbortSignal.timeout(30000) }).catch(() => null);
+  if (!uploaded?.ok) throw new UpstreamError("Não foi possível salvar o áudio interno", 502);
+  try {
+    const rows = await agentRest("panel_internal_messages", { method: "POST", params: { select: "*" }, body: { sender_user_id: req.operator!.user_id, team_id: teamId, recipient_user_id: recipientUserId, body: "[Áudio]", media_path: path, media_mime_type: mime, media_duration_seconds: duration }, headers: { Prefer: "return=representation" } });
+    res.status(201).json({ message: rows[0] });
+  } catch (error) {
+    await fetch(storageUrl, { method: "DELETE", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` } }).catch(() => undefined);
+    throw error;
+  }
+});
+router.get("/internal/media/:id", async (req: AuthRequest, res) => {
+  const id = safeId(String(req.params.id));
+  const rows = await agentRest("panel_internal_messages", { params: { select: "team_id,recipient_user_id,sender_user_id,media_path,media_mime_type", id: `eq.${id}`, limit: "1" } });
+  const message = rows?.[0];
+  if (!message?.media_path || !message.media_mime_type?.startsWith("audio/")) throw new UpstreamError("Áudio não encontrado", 404);
+  if (message.team_id) await teamAccess(req.operator!, message.team_id);
+  else if (![message.sender_user_id, message.recipient_user_id].includes(req.operator!.user_id)) throw new UpstreamError("Sem acesso a este áudio", 403);
+  const stored = await fetch(`${config.agentUrl()}/storage/v1/object/authenticated/aluga-internal-chat/${encodeURIComponent(message.media_path)}`, { headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` }, signal: AbortSignal.timeout(30000) }).catch(() => null);
+  if (!stored?.ok) throw new UpstreamError("Áudio arquivado indisponível", 502);
+  const bytes = Buffer.from(await stored.arrayBuffer());
+  if (bytes.length > 5 * 1024 * 1024) throw new UpstreamError("Áudio acima do limite", 413);
+  res.setHeader("Content-Type", message.media_mime_type);
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.send(bytes);
 });
 
 router.get("/conversations", async (req: AuthRequest, res) => {

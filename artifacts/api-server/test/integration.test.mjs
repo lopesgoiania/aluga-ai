@@ -33,6 +33,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let profileImageAvailable = true;
   let profileLookups = 0;
   let sessionPhone = '5562999999999@s.whatsapp.net';
+  const internalMessages = [];
+  let storedInternalAudio = '';
   const reservations = new Set();
   const upstream = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://local');
@@ -95,6 +97,22 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       return json([{ id: teamId, name: 'Comercial', ai_enabled: false, active: true }]);
     }
     if (url.pathname === '/rest/v1/panel_team_members') return json(req.method === 'POST' ? [{ team_id: teamId, user_id: invitedId, active: true }] : []);
+    if (url.pathname === '/rest/v1/panel_internal_messages') {
+      if (req.method === 'POST') {
+        const body = JSON.parse(await new Response(req).text());
+        const row = { id: body.media_path ? mediaId : 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', created_at: '2026-10-22T12:00:00Z', ...body };
+        internalMessages.push(row); return json([row]);
+      }
+      if (url.searchParams.has('id')) return json(internalMessages.filter((row) => row.id === url.searchParams.get('id')?.slice(3)));
+      if (url.searchParams.has('team_id')) return json(internalMessages.filter((row) => row.team_id === url.searchParams.get('team_id')?.slice(3)));
+      return json(internalMessages);
+    }
+    if (url.pathname.startsWith('/storage/v1/object/aluga-internal-chat/')) {
+      storedInternalAudio = await new Response(req).text(); return json({ Key: url.pathname });
+    }
+    if (url.pathname.startsWith('/storage/v1/object/authenticated/aluga-internal-chat/')) {
+      res.writeHead(200, { 'Content-Type': 'audio/webm' }); res.end(storedInternalAudio); return;
+    }
     if (url.pathname === '/storage/v1/object/authenticated/eva-media/Teste/AUDIO-1') { res.writeHead(200, { 'Content-Type': 'audio/ogg' }); res.end('archived-media'); return; }
     if (url.pathname === '/rest/v1/panel_audit_log') return json({});
     if (url.pathname === '/rest/v1/property_interests') return json([]);
@@ -156,6 +174,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(login.status, 200);
     const cookie = login.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
     const get = (path) => fetch(`${base}${path}`, { headers: { Cookie: cookie } });
+    const post = (path, body, asCookie = cookie) => fetch(`${base}${path}`, { method: 'POST', headers: { Cookie: asCookie, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const acceptInvite = await fetch(`${base}/auth/accept-invite`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accessToken: 'attendant-access', refreshToken: 'test-refresh', password: 'senha-segura-123' }) });
     assert.equal((await acceptInvite.json()).operator.user_id, attendantId);
     const conversations = await (await get('/conversations')).json();
@@ -163,6 +182,14 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(conversations.conversations[0].contact.name, 'Cliente Teste');
     assert.equal(conversations.conversations[0].tags[0].slug, 'inquilino');
     assert.equal((await (await get('/operators')).json()).operators.length, 2);
+    assert.equal((await (await get('/internal/directory')).json()).operators.length, 2);
+    assert.ok((await (await get('/internal/conversations')).json()).latest);
+    assert.equal((await post('/internal/messages', { teamId, body: 'Aviso interno' })).status, 201);
+    assert.equal((await (await get(`/internal/messages?teamId=${teamId}`)).json()).messages[0].body, 'Aviso interno');
+    const internalAudio = await post('/internal/audio', { teamId, mimeType: 'audio/webm', durationSeconds: 2, base64: Buffer.from('audio-interno').toString('base64') });
+    assert.equal(internalAudio.status, 201);
+    assert.equal((await get(`/internal/media/${mediaId}`)).status, 200);
+    assert.equal(await (await get(`/internal/media/${mediaId}`)).text(), 'audio-interno');
     const knowledge = await (await get('/knowledge')).json();
     assert.equal(knowledge.audienceEnabled, true);
     assert.equal(knowledge.entries[0].audience, 'proprietario');
@@ -248,6 +275,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(attendantLogin.status, 200);
     const attendantCookie = attendantLogin.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
     const attendantGet = (path) => fetch(`${base}${path}`, { headers: { Cookie: attendantCookie } });
+    assert.equal((await attendantGet(`/internal/media/${mediaId}`)).status, 403, 'Áudio de equipe só pode ser ouvido por membro autorizado');
+    assert.equal((await post('/internal/messages', { teamId, body: 'Sem acesso' }, attendantCookie)).status, 403);
     assert.equal((await attendantGet('/knowledge/gaps')).status, 403, 'Lacunas de conhecimento exigem supervisor ou administrador');
     const forbiddenReset = await fetch(`${base}/operators/${userId}/password`, { method: 'PUT', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'senha-tentativa-123' }) });
     assert.equal(forbiddenReset.status, 403, 'Atendente não pode definir senha de outro usuário');
