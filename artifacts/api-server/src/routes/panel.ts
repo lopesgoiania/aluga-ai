@@ -1097,8 +1097,17 @@ router.get("/connection/instances", async (_req, res) => {
   res.json({ instances: (Array.isArray(rows) ? rows : []).map((row: any) => ({ name: row.name, state: row.connectionStatus, profileName: row.profileName, number: row.ownerJid })) });
 });
 router.get("/channels", async (_req, res) => {
-  const channels = await agentRest("panel_channels", { params: { select: "id,instance_name,display_name,purpose,instructions,default_team_id,ai_enabled,active", order: "display_name.asc" } });
+  const channels = await agentRest("panel_channels", { params: { select: "id,instance_name,display_name,purpose,instructions,default_team_id,ai_enabled,learning_enabled,active", order: "display_name.asc" } });
   res.json({ channels });
+});
+router.patch("/channels/:id/learning", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const id = safeId(String(req.params.id));
+  if (typeof req.body?.enabled !== "boolean") throw new UpstreamError("Configuração de aprendizado inválida", 400);
+  const rows = await agentRest("panel_channels", { method: "PATCH", params: { id: `eq.${id}`, select: "id,learning_enabled" }, body: { learning_enabled: req.body.enabled }, headers: { Prefer: "return=representation" } });
+  if (!rows.length) throw new UpstreamError("Canal não encontrado", 404);
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "channel_learning_updated", details: { channel_id: id, learning_enabled: req.body.enabled } } });
+  res.json({ channel: rows[0] });
 });
 router.patch("/channels/:id", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);

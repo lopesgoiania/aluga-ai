@@ -9,7 +9,9 @@ const matchesSecret = (provided: string, expected: string) => {
 };
 
 router.get('/internal/monitor-connections', async (req, res, next) => {
-  const secret = process.env.PANEL_MONITOR_SECRET?.trim();
+  // The separate monitor secret takes precedence; the existing server-to-server
+  // service key keeps the monitor deployable until that secret is configured.
+  const secret = process.env.PANEL_MONITOR_SECRET?.trim() || process.env.SUPABASE_AGENT_SERVICE_ROLE_KEY?.trim();
   if (!secret) { res.status(503).json({ error: 'Monitor não configurado' }); return; }
   if (!matchesSecret(String(req.get('authorization') ?? ''), `Bearer ${secret}`)) { res.status(401).json({ error: 'Não autorizado' }); return; }
   try {
