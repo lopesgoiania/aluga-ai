@@ -34,6 +34,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let archiveReady = false;
   let outboundArchives = 0;
   let disconnected = false;
+  let healthFailures = 0;
+  let knowledgeLink = null;
   let attendantRemoved = false;
   let invitationsSent = 0;
   let createdWithPassword = 0;
@@ -139,7 +141,13 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
         assert.equal(body.audience, 'proprietario');
         return json([{ id: invitedId, title: body.title, content: body.content, audience: body.audience, status: 'draft', version: 1 }]);
       }
-      return json([{ id: invitedId, title: 'Procedimento de captação', content: 'A equipe entra em contato com o proprietário.', audience: 'proprietario', status: 'approved', scope: 'global', source_type: 'manual', version: 1, updated_at: '2026-10-22T12:00:00Z' }]);
+      const entries = [{ id: invitedId, title: 'Procedimento de captação', content: 'A equipe entra em contato com o proprietário.', audience: 'proprietario', status: 'approved', scope: 'global', source_type: 'manual', version: 1, updated_at: '2026-10-22T12:00:00Z' }, { id: textId, title: 'Transferência', content: 'Encaminhar ao comercial.', audience: 'all', status: 'approved', version: 1 }];
+      return json(url.searchParams.has('id') ? entries.filter((entry) => url.searchParams.get('id')?.includes(entry.id)) : entries);
+    }
+    if (url.pathname === '/rest/v1/agent_knowledge_links') {
+      if (req.method === 'POST') { knowledgeLink = { id: mediaId, ...JSON.parse(await new Response(req).text()) }; return json([knowledgeLink]); }
+      if (req.method === 'PATCH') { knowledgeLink = { ...knowledgeLink, ...JSON.parse(await new Response(req).text()) }; return json([knowledgeLink]); }
+      return json(knowledgeLink ? [knowledgeLink] : []);
     }
     if (url.pathname === '/rest/v1/agent_events') return json(url.searchParams.get('event_type') === 'eq.agent_decision' ? [{ id: invitedId, session_id: sessionId, created_at: '2026-10-22T12:00:00Z', payload: { knowledge_gap: true, combined_content: 'Qual é a taxa de administração?', handoff_reason: 'Sem fonte aprovada' } }] : []);
     if (url.pathname === '/rest/v1/agent_learning_scans') return json([{ session_id: sessionId, scanned_at: '2026-10-22T12:00:00Z' }]);
@@ -147,7 +155,9 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/rest/v1/panel_outbound') return json(url.searchParams.has('session_id') ? [] : [{ id: outboundId, session_id: sessionId, body: 'Pendente', status: 'uncertain', created_at: '2026-10-02T12:00:00Z' }]);
     if (url.pathname === '/rest/v1/properties') return json([{ source_property_id: 'R-1', title: 'Galpão', city: 'Goiânia', area: 200 }]);
     if (url.pathname === '/instance/connectionState/Teste') return json({ instance: { state: 'open' } });
-    if (url.pathname === '/instance/fetchInstances') return json([{ name: 'Teste', connectionStatus: 'open', ownerJid: '5562999999999@s.whatsapp.net' }]);
+    if (url.pathname === '/instance/fetchInstances') return json([{ name: 'Teste', connectionStatus: disconnected ? 'close' : 'open', ownerJid: '5562999999999@s.whatsapp.net' }]);
+    if (url.pathname === '/rest/v1/panel_channel_health') return json([{ channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', state: disconnected ? 'close' : 'open', incident_open: healthFailures >= 2, consecutive_failures: healthFailures }]);
+    if (url.pathname === '/rest/v1/rpc/panel_record_channel_health') { const body = JSON.parse(await new Response(req).text()); healthFailures = body.p_state === 'open' ? 0 : healthFailures + 1; return json({ incident_open: healthFailures >= 2, consecutive_failures: healthFailures }); }
     if (url.pathname === '/instance/logout/Teste' && req.method === 'DELETE') { disconnected = true; return json({ status: 'SUCCESS' }); }
     if (url.pathname === '/chat/fetchProfilePictureUrl/Teste') { profileLookups++; return json({ profilePictureUrl: profileImageAvailable ? 'https://example.test/avatar.jpg' : '' }); }
     if (url.pathname === '/chat/findMessages/Teste') { const body = JSON.parse(await new Response(req).text()); const id = body.where.key.id; return json({ messages: { records: [{ key: { id, remoteJid: sessionPhone, fromMe: id !== 'AUDIO-1' }, message: { conversation: originalContent } }] } }); }
@@ -179,6 +189,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       SUPABASE_AGENT_ANON_KEY: 'test-anon', SUPABASE_AGENT_SERVICE_ROLE_KEY: 'test-service',
       SUPABASE_CATALOG_URL: `http://127.0.0.1:${upstreamPort}`, SUPABASE_CATALOG_SERVICE_ROLE_KEY: 'test-catalog',
       EVOLUTION_API_URL: `http://127.0.0.1:${upstreamPort}`, EVOLUTION_API_KEY: 'test-evo', EVOLUTION_INSTANCE: 'Teste',
+      PANEL_MONITOR_SECRET: 'test-monitor-secret',
     },
   });
   const base = `http://127.0.0.1:${port}/api`;
@@ -221,6 +232,12 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     const learning = await (await get('/knowledge/learning')).json();
     assert.equal(learning.scans.length, 1);
     assert.equal(learning.suggestions[0].status, 'pending');
+    assert.equal((await (await get('/knowledge/map')).json()).available, true);
+    const link = await post('/knowledge/links', { fromId: invitedId, toId: textId, relation: 'hands_off_to' });
+    assert.equal(link.status, 201);
+    assert.equal((await link.json()).link.status, 'draft');
+    assert.equal((await (await post(`/knowledge/links/${mediaId}/approve`, {})).json()).link.status, 'approved');
+    assert.equal((await (await get('/knowledge/map')).json()).links.length, 1);
     const addKnowledge = await fetch(`${base}/knowledge`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Captação de imóvel', content: 'A equipe entra em contato com o proprietário.', audience: 'proprietario' }) });
     assert.equal(addKnowledge.status, 201);
     assert.equal((await addKnowledge.json()).entry.audience, 'proprietario');
@@ -272,13 +289,19 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     const disconnect = await fetch(`${base}/connection/instances/Teste/disconnect`, { method: 'POST', headers: { Cookie: cookie } });
     assert.equal((await disconnect.json()).disconnected, true);
     assert.equal(disconnected, true);
+    assert.equal((await fetch(`${base}/internal/monitor-connections`)).status, 401);
+    const monitor = () => fetch(`${base}/internal/monitor-connections`, { headers: { Authorization: 'Bearer test-monitor-secret' } });
+    assert.equal((await (await monitor()).json()).incidents, 0);
+    assert.equal((await (await monitor()).json()).incidents, 1, 'Duas verificações confirmam a desconexão');
     const edit = await fetch(`${base}/conversations/${sessionId}/contact`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Cliente Teste', email: 'teste@example.test', notes: 'Importante', fields: { Preferencia: 'Galpão' } }) });
     assert.equal(edit.status, 200);
     const catalog = await (await get('/properties')).json();
     assert.equal(catalog.properties[0].city, 'Goiânia');
     assert.equal(catalog.properties[0].id, 'R-1');
     assert.equal((await (await get('/connection')).json()).data.instance.state, 'open');
-    assert.equal((await (await get('/alerts')).json()).outbound[0].status, 'uncertain');
+    const alerts = await (await get('/alerts')).json();
+    assert.equal(alerts.outbound[0].status, 'uncertain');
+    assert.equal(alerts.connections[0].incidentOpen, true);
     const claim = await fetch(`${base}/conversations/${sessionId}/claim`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}' });
     assert.equal((await claim.json()).assigned_to, 'Operador Teste');
     const reconcile = () => fetch(`${base}/alerts/outbound/${outboundId}/reconcile`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'failed' }) });

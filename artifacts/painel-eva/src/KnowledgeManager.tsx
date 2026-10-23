@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Archive, ArrowRight, BookOpen, Check, FileText, Lightbulb, Pencil, Plus, Search, ShieldCheck, Sparkles, Upload, X, MessageCircle, Building2, Users, AlertTriangle, ExternalLink } from 'lucide-react';
+import { Archive, ArrowRight, BookOpen, Check, FileText, Lightbulb, Pencil, Plus, Search, ShieldCheck, Sparkles, Upload, X, MessageCircle, Building2, Users, AlertTriangle, ExternalLink, Network, Link2 } from 'lucide-react';
 import { api, dateTime, type Operator } from './services/api';
 import policySnapshot from './lia-policy-snapshot.json';
 
@@ -7,9 +7,10 @@ type Audience = 'all' | 'inquilino' | 'proprietario' | 'corretor';
 type Status = 'draft' | 'approved' | 'archived';
 type Entry = { id: string; title: string; content: string; status: Status; audience: Audience; scope: string; source_type: string; source_path?: string | null; version: number; updated_at: string; approved_at?: string | null };
 type Suggestion = { id: string; session_id?: string; suggested_title: string; suggested_content: string; created_at: string };
-type Learning = { scans: { session_id: string; scanned_at: string }[]; suggestions: { id: string; session_id?: string; suggested_title: string; status: 'pending' | 'approved' | 'rejected'; created_at: string; reviewed_at?: string | null }[]; approved: { id: string; title: string; approved_at?: string | null }[]; sampleLimit: number };
+type Learning = { scans: { session_id: string; scanned_at: string; outcome?: 'analyzed' | 'ignored'; reason?: string | null }[]; suggestions: { id: string; session_id?: string; suggested_title: string; status: 'pending' | 'approved' | 'rejected'; created_at: string; reviewed_at?: string | null }[]; approved: { id: string; title: string; approved_at?: string | null }[]; sampleLimit: number };
 type Gap = { id: string; session_id?: string; question: string; reason: string; created_at: string };
-type View = 'guide' | 'library' | 'gaps' | 'suggestions' | 'learning';
+type KnowledgeLink = { id: string; from_id: string; to_id: string; relation: 'complements' | 'requires' | 'applies_to' | 'contradicts' | 'hands_off_to'; status: 'draft' | 'approved'; created_at: string };
+type View = 'guide' | 'library' | 'map' | 'gaps' | 'suggestions' | 'learning';
 type Channel = { id: string; display_name: string; instance_name: string; purpose?: string | null; instructions?: string | null; default_team_id?: string | null; ai_enabled: boolean; active: boolean };
 type Team = { id: string; name: string; ai_enabled: boolean; active: boolean };
 const guideSections = [
@@ -35,6 +36,8 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
   const [entries, setEntries] = useState<Entry[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [learning, setLearning] = useState<Learning | null>(null);
+  const [links, setLinks] = useState<KnowledgeLink[]>([]);
+  const [mapAvailable, setMapAvailable] = useState(false);
   const [gaps, setGaps] = useState<Gap[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
@@ -58,15 +61,17 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
   const [busy, setBusy] = useState(false);
 
   const load = async () => {
-    const [library, pending, unanswered, learningActivity] = await Promise.all([
+    const [library, pending, unanswered, learningActivity, map] = await Promise.all([
       api<{ entries: Entry[]; audienceEnabled: boolean }>('/knowledge'),
       canReviewCases ? api<{ suggestions: Suggestion[] }>('/knowledge/suggestions') : Promise.resolve({ suggestions: [] }),
       canReviewCases ? api<{ gaps: Gap[] }>('/knowledge/gaps') : Promise.resolve({ gaps: [] }),
       canReviewCases ? api<Learning>('/knowledge/learning') : Promise.resolve(null),
+      api<{ links: KnowledgeLink[]; available: boolean }>('/knowledge/map').catch(() => ({ links: [], available: false })),
     ]);
     setEntries(library.entries); setAudienceEnabled(library.audienceEnabled);
     setSuggestions(pending.suggestions); setGaps(unanswered.gaps);
     setLearning(learningActivity);
+    setLinks(map.links); setMapAvailable(map.available);
     setLoadError(''); setLoading(false);
   };
   useEffect(() => { void load().catch((error) => { setLoadError(error instanceof Error ? error.message : 'Não foi possível carregar os conhecimentos.'); setLoading(false); }); }, []);
@@ -131,6 +136,18 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
     } catch (error) { flash(error instanceof Error ? error.message : 'Falha ao revisar a sugestão.'); }
     finally { setBusy(false); }
   }
+  async function saveLink(fromId: string, toId: string, relation: KnowledgeLink['relation']) {
+    setBusy(true);
+    try { await api('/knowledge/links', { method: 'POST', body: { fromId, toId, relation } }); await load(); flash('Relação salva como rascunho para revisão.'); }
+    catch (error) { flash(error instanceof Error ? error.message : 'Falha ao salvar a relação.'); }
+    finally { setBusy(false); }
+  }
+  async function changeLink(id: string, action: 'approve' | 'archive') {
+    setBusy(true);
+    try { await api(`/knowledge/links/${id}/${action}`, { method: 'POST' }); await load(); flash(action === 'approve' ? 'Relação aprovada no mapa.' : 'Relação arquivada.'); }
+    catch (error) { flash(error instanceof Error ? error.message : 'Falha ao atualizar a relação.'); }
+    finally { setBusy(false); }
+  }
   function draftFromGap(gap: Gap) {
     setView('library'); setStatusFilter('draft'); setEditor('text'); setEditing(null);
     setTitle(`Resposta para: ${gap.question.replace(/\s+/g, ' ').slice(0, 135)}`);
@@ -168,6 +185,7 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
         <nav className="knowledge-tabs" aria-label="Áreas do conhecimento">
           <button type="button" className={view === 'guide' ? 'active' : ''} onClick={() => setView('guide')} aria-current={view === 'guide' ? 'page' : undefined}><ShieldCheck size={17} /> Como atende</button>
           <button type="button" className={view === 'library' ? 'active' : ''} onClick={() => setView('library')} aria-current={view === 'library' ? 'page' : undefined}><BookOpen size={17} /> Biblioteca</button>
+          <button type="button" className={view === 'map' ? 'active' : ''} onClick={() => setView('map')} aria-current={view === 'map' ? 'page' : undefined}><Network size={17} /> Mapa</button>
           {canReviewCases && <button type="button" className={view === 'gaps' ? 'active' : ''} onClick={() => setView('gaps')} aria-current={view === 'gaps' ? 'page' : undefined}><Lightbulb size={17} /> Lacunas <span>{gaps.length}</span></button>}
           {canReviewCases && <button type="button" className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')} aria-current={view === 'suggestions' ? 'page' : undefined}><FileText size={17} /> Sugestões <span>{suggestions.length}</span></button>}
           {canReviewCases && <button type="button" className={view === 'learning' ? 'active' : ''} onClick={() => setView('learning')} aria-current={view === 'learning' ? 'page' : undefined}><Sparkles size={17} /> Aprendizado</button>}
@@ -189,6 +207,8 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
           <div className="knowledge-guide-footer"><span>Informações aprovadas e documentos ficam na Biblioteca; rascunhos não orientam respostas.</span><button type="button" className="button button-outline" onClick={() => setView('library')}>Abrir biblioteca <ExternalLink size={14} /></button></div>
         </div>}
 
+        {view === 'map' && <KnowledgeMap entries={entries} links={links} available={mapAvailable} canEdit={canEdit} canApprove={canReviewCases} busy={busy} onCreate={saveLink} onChange={changeLink} />}
+
         {view === 'library' && <>
           <div className="knowledge-toolbar"><label className="knowledge-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar título ou conteúdo" aria-label="Buscar conhecimentos" /></label><select value={audienceFilter} onChange={(event) => setAudienceFilter(event.target.value as Audience | 'any')} aria-label="Filtrar por público"><option value="any">Qualquer público</option>{audiences.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as Status | 'active')} aria-label="Filtrar por situação"><option value="active">Ativos e em revisão</option><option value="approved">Aprovados</option><option value="draft">Em revisão</option><option value="archived">Arquivados ({counts.archived})</option></select></div>
           {loading ? <div className="knowledge-empty">Carregando conhecimentos…</div> : visibleEntries.length ? <div className="knowledge-list">{visibleEntries.map((entry) => <article className={`knowledge-entry ${expanded === entry.id ? 'expanded' : ''}`} key={entry.id}>
@@ -205,10 +225,67 @@ export default function KnowledgeManager({ operator, flash }: { operator: Operat
 
         {view === 'suggestions' && canReviewCases && <div className="knowledge-panel"><div className="knowledge-panel-intro"><h3>Ideias extraídas de atendimentos</h3><p>Uma sugestão aceita vira rascunho. Nenhuma resposta humana passa a orientar a LIA sem revisão e aprovação.</p></div>{suggestions.length ? suggestions.map((suggestion) => <article className="knowledge-suggestion" key={suggestion.id}><strong>{suggestion.suggested_title}</strong><p>{suggestion.suggested_content}</p><small>{dateTime(suggestion.created_at)}</small><div className="knowledge-entry-actions"><button type="button" className="button button-primary" disabled={busy} onClick={() => void review(suggestion, true)}>Revisar como rascunho</button><button type="button" className="button button-outline" disabled={busy} onClick={() => void review(suggestion, false)}>Descartar</button></div></article>) : <div className="knowledge-empty"><Lightbulb size={23} /><strong>Sem sugestões pendentes</strong><p>Quando a análise de atendimentos encontrar algo útil, ele aparecerá aqui para revisão.</p></div>}</div>}
 
-        {view === 'learning' && canReviewCases && learning && <div className="knowledge-learning"><div className="knowledge-panel-intro"><h3>O que a LIA aprendeu de fato</h3><p>O fluxo analisa atendimentos humanos e propõe informações. Só uma proposta revisada, transformada em rascunho e aprovada entra na base consultada pela LIA.</p></div><div className="knowledge-learning-steps"><span><strong>{learning.scans.length}</strong> conversas analisadas</span><span><strong>{learning.suggestions.length}</strong> propostas geradas</span><span><strong>{learning.suggestions.filter((item) => item.status === 'approved').length}</strong> aceitas para revisão</span><span><strong>{learning.approved.length}</strong> conhecimentos de conversas aprovados</span></div><p className="knowledge-learning-note">Cada número mostra até {learning.sampleLimit} registros recentes, não um total histórico. Uma conversa analisada pode não gerar proposta; proposta aceita ainda não é conhecimento ativo.</p><div className="knowledge-learning-columns"><section><h4>Atividade recente</h4>{learning.suggestions.length ? learning.suggestions.slice(0, 12).map((item) => <div className="knowledge-learning-row" key={item.id}><strong>{item.suggested_title}</strong><small>{item.status === 'pending' ? 'Aguardando revisão' : item.status === 'approved' ? 'Aceita como rascunho' : 'Descartada'} · {dateTime(item.created_at)}</small></div>) : <p>Nenhuma proposta registrada na amostra recente. Última análise: {learning.scans[0] ? dateTime(learning.scans[0].scanned_at) : 'ainda não registrada'}.</p>}</section><section><h4>Já aprovado a partir de conversas</h4>{learning.approved.length ? learning.approved.slice(0, 12).map((item) => <div className="knowledge-learning-row" key={item.id}><strong>{item.title}</strong><small>Aprovado em {dateTime(item.approved_at ?? undefined)}</small></div>) : <p>Ainda não há conhecimento de atendimento humano aprovado nesta amostra. A LIA não incorpora respostas automaticamente.</p>}</section></div><div className="knowledge-learning-evidence"><ShieldCheck size={18} /><p><strong>Como medir melhora:</strong> compare respostas da LIA em casos reais antes e depois de uma aprovação, conferindo se usou a fonte correta, evitou inventar e transferiu quando necessário. Quantidade de propostas, sozinha, não mede qualidade.</p></div></div>}
+        {view === 'learning' && canReviewCases && learning && <div className="knowledge-learning">
+          <div className="knowledge-panel-intro"><h3>Aprendizado supervisionado</h3><p>O fluxo observa respostas humanas no canal habilitado, separa conversas fora da operação e propõe informações para revisão. Nada é publicado automaticamente.</p></div>
+          <div className="knowledge-learning-steps"><span><strong>{learning.scans.filter((item) => item.outcome !== 'ignored').length}</strong> conversas analisadas</span><span><strong>{learning.scans.filter((item) => item.outcome === 'ignored').length}</strong> ignoradas na triagem</span><span><strong>{learning.suggestions.filter((item) => item.status === 'pending').length}</strong> propostas para revisar</span><span><strong>{learning.approved.length}</strong> conhecimentos aprovados</span></div>
+          <p className="knowledge-learning-note">Cada número mostra até {learning.sampleLimit} registros recentes, não o total histórico. Aprovar uma proposta cria um rascunho; só a aprovação do conhecimento permite que a LIA o consulte.</p>
+          <div className="knowledge-learning-columns"><section><h4>Propostas recentes</h4>{learning.suggestions.length ? learning.suggestions.slice(0, 12).map((item) => <div className="knowledge-learning-row" key={item.id}><strong>{item.suggested_title}</strong><small>{item.status === 'pending' ? 'Aguardando revisão' : item.status === 'approved' ? 'Aceita como rascunho' : 'Descartada'} · {dateTime(item.created_at)}</small></div>) : <p>Nenhuma proposta registrada nesta amostra.</p>}</section><section><h4>Já aprovado a partir de conversas</h4>{learning.approved.length ? learning.approved.slice(0, 12).map((item) => <div className="knowledge-learning-row" key={item.id}><strong>{item.title}</strong><small>Aprovado em {dateTime(item.approved_at ?? undefined)}</small></div>) : <p>Ainda não há conhecimento de atendimento humano aprovado nesta amostra.</p>}</section></div>
+          <section className="knowledge-learning-triage"><h4>Triagem recente</h4>{learning.scans.length ? learning.scans.slice(0, 20).map((scan) => <div className="knowledge-learning-row" key={scan.session_id}><strong>{scan.outcome === 'ignored' ? 'Ignorada' : 'Analisada'} · conversa {scan.session_id.slice(0, 8)}</strong><small>{scan.reason || (scan.outcome === 'ignored' ? 'Motivo não registrado' : 'Resposta humana examinada')} · {dateTime(scan.scanned_at)}</small></div>) : <p>Nenhuma conversa examinada ainda.</p>}</section>
+          <div className="knowledge-learning-evidence"><ShieldCheck size={18} /><p><strong>Como medir melhora:</strong> compare respostas da LIA em casos reais antes e depois de uma aprovação, conferindo fonte correta, invenções, transferências e regressões. A quantidade de propostas, sozinha, não mede qualidade.</p></div>
+        </div>}
       </section>
 
       <aside className="knowledge-aside" aria-label="Funcionamento e limites da LIA"><div className="knowledge-aside-head"><ShieldCheck size={18} /><h3>Como a LIA usa esta base</h3></div><ol><li><strong>Rascunho</strong><span>Você registra e revisa a informação.</span></li><li><strong>Aprovação</strong><span>O conteúdo passa a poder ser consultado.</span></li><li><strong>Resposta</strong><span>A LIA só recebe entradas aprovadas e relevantes à pergunta.</span></li></ol><div className="knowledge-aside-divider" /><h4>Limites do fluxo atual</h4><p>Sem fonte confirmada para uma pergunta factual, o atendimento deve seguir para uma pessoa da equipe.</p><p>Um PDF anexado não é interpretado automaticamente. Transcreva os fatos antes de aprovar.</p><p>Conteúdos por público dependem da identificação do perfil na conversa; revise os primeiros atendimentos após publicar uma regra.</p></aside>
     </div>
+  </div>;
+}
+
+const relationLabels: Record<KnowledgeLink['relation'], string> = {
+  complements: 'complementa', requires: 'exige', applies_to: 'aplica-se a',
+  contradicts: 'contradiz', hands_off_to: 'encaminha para',
+};
+
+function KnowledgeMap({ entries, links, available, canEdit, canApprove, busy, onCreate, onChange }: {
+  entries: Entry[]; links: KnowledgeLink[]; available: boolean; canEdit: boolean; canApprove: boolean; busy: boolean;
+  onCreate: (fromId: string, toId: string, relation: KnowledgeLink['relation']) => Promise<void>;
+  onChange: (id: string, action: 'approve' | 'archive') => Promise<void>;
+}) {
+  const [audience, setAudience] = useState<Audience | 'any'>('any');
+  const [term, setTerm] = useState('');
+  const [selected, setSelected] = useState<string | null>(null);
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [relation, setRelation] = useState<KnowledgeLink['relation']>('complements');
+  const active = entries.filter((entry) => entry.status !== 'archived');
+  const filtered = active.filter((entry) => (audience === 'any' || entry.audience === audience || entry.audience === 'all') && `${entry.title} ${entry.content}`.toLocaleLowerCase('pt-BR').includes(term.toLocaleLowerCase('pt-BR')));
+  const shown = filtered.slice(0, 30);
+  const selectedEntry = active.find((entry) => entry.id === selected);
+  const positions = new Map(shown.map((entry, index) => [entry.id, 54 + index * 60]));
+  const audiencePositions = audiences.map((item) => {
+    const points = shown.filter((entry) => entry.audience === item.value).map((entry) => positions.get(entry.id) ?? 0);
+    return { ...item, y: points.length ? points.reduce((sum, point) => sum + point, 0) / points.length : null };
+  }).filter((item): item is typeof item & { y: number } => item.y !== null);
+  const height = Math.max(320, 110 + shown.length * 60);
+  const visibleLinks = links.filter((link) => positions.has(link.from_id) && positions.has(link.to_id));
+  return <div className="knowledge-map">
+    <div className="knowledge-panel-intro"><h3>Mapa do conhecimento</h3><p>Explore conteúdos por público, origem e situação. As ligações são revisadas separadamente; por enquanto, elas organizam a base e não alteram a resposta da LIA.</p></div>
+    <div className="knowledge-map-toolbar"><label className="knowledge-search"><Search size={15} /><input value={term} onChange={(event) => setTerm(event.target.value)} placeholder="Buscar no mapa" aria-label="Buscar no mapa" /></label><select value={audience} onChange={(event) => setAudience(event.target.value as Audience | 'any')} aria-label="Filtrar mapa por público"><option value="any">Todos os públicos</option>{audiences.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></div>
+    {!available && <p className="knowledge-map-warning">A visualização está disponível. Para criar relações, aplique a migração 32 no banco operacional.</p>}
+    {shown.length ? <div className="knowledge-map-scroll" role="region" aria-label="Relações entre públicos e conhecimentos" tabIndex={0}><div className="knowledge-map-canvas" style={{ height }}>
+      <svg className="knowledge-map-lines" viewBox={`0 0 780 ${height}`} preserveAspectRatio="none" aria-hidden="true">
+        {shown.map((entry) => {
+          const audiencePoint = audiencePositions.find((item) => item.value === entry.audience);
+          return <path key={`audience-${entry.id}`} d={`M 194 ${audiencePoint?.y ?? 54} C 242 ${audiencePoint?.y ?? 54}, 244 ${positions.get(entry.id)}, 292 ${positions.get(entry.id)}`} className="knowledge-map-line audience" />;
+        })}
+        {visibleLinks.map((link) => <path key={link.id} d={`M 610 ${positions.get(link.from_id)} C 722 ${positions.get(link.from_id)}, 722 ${positions.get(link.to_id)}, 610 ${positions.get(link.to_id)}`} className={`knowledge-map-line ${link.status}`} />)}
+      </svg>
+      <div className="knowledge-map-column-label audience">Públicos</div><div className="knowledge-map-column-label entries">Informações e regras</div>
+      {audiencePositions.map((item) => <div className="knowledge-map-audience" key={item.value} style={{ top: item.y - 19 }}>{item.label}</div>)}
+      {shown.map((entry) => <button type="button" key={entry.id} className={`knowledge-map-node ${entry.status} ${selected === entry.id ? 'selected' : ''}`} style={{ top: (positions.get(entry.id) ?? 54) - 23 }} onClick={() => setSelected(entry.id)} aria-pressed={selected === entry.id}><strong>{entry.title}</strong><span>{entry.status === 'approved' ? 'Aprovado' : 'Em revisão'} · {entry.source_type === 'conversation' ? 'Atendimento' : entry.source_type === 'document' ? 'Documento' : 'Cadastro'} · v{entry.version}</span></button>)}
+    </div></div> : <div className="knowledge-empty"><Network size={23} /><strong>Nenhum conhecimento encontrado</strong><p>Altere os filtros ou cadastre uma informação na Biblioteca.</p></div>}
+    <p className="knowledge-list-caption">Exibindo {shown.length} de {filtered.length} conteúdos encontrados. Linhas azuis são relações aprovadas; linhas tracejadas aguardam revisão.</p>
+    {selectedEntry && <section className="knowledge-map-detail" aria-label="Conhecimento selecionado"><div><strong>{selectedEntry.title}</strong><span>{audienceLabel(selectedEntry.audience)} · {statusLabel[selectedEntry.status]} · versão {selectedEntry.version}</span></div><p>{selectedEntry.content}</p><button type="button" className="button button-outline" onClick={() => setSelected(null)}>Fechar detalhes</button></section>}
+    {available && canEdit && <form className="knowledge-map-link-form" onSubmit={(event) => { event.preventDefault(); if (from && to && from !== to) void onCreate(from, to, relation); }}><h4><Link2 size={16} /> Criar uma ligação</h4><p>A relação nasce em revisão. Mesmo aprovada, ela não modifica automaticamente as instruções da LIA.</p><div><label>De<select required value={from} onChange={(event) => setFrom(event.target.value)}><option value="">Selecione</option>{active.map((entry) => <option value={entry.id} key={entry.id}>{entry.title}</option>)}</select></label><label>Relação<select value={relation} onChange={(event) => setRelation(event.target.value as KnowledgeLink['relation'])}>{Object.entries(relationLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label>Para<select required value={to} onChange={(event) => setTo(event.target.value)}><option value="">Selecione</option>{active.map((entry) => <option value={entry.id} key={entry.id}>{entry.title}</option>)}</select></label><button type="submit" className="button button-primary" disabled={busy || !from || !to || from === to}>Criar rascunho</button></div></form>}
+    {available && <section className="knowledge-map-links"><h4>Ligações registradas</h4>{links.length ? links.map((link) => <div className="knowledge-map-link-row" key={link.id}><span><strong>{active.find((entry) => entry.id === link.from_id)?.title ?? 'Conhecimento arquivado'}</strong> {relationLabels[link.relation]} <strong>{active.find((entry) => entry.id === link.to_id)?.title ?? 'Conhecimento arquivado'}</strong><small>{link.status === 'approved' ? 'Aprovada' : 'Aguardando aprovação'}</small></span>{canApprove && link.status === 'draft' && <button className="button button-outline" type="button" disabled={busy} onClick={() => void onChange(link.id, 'approve')}>Aprovar</button>}{canEdit && <button className="button button-outline" type="button" disabled={busy} onClick={() => void onChange(link.id, 'archive')}>Arquivar</button>}</div>) : <p>Nenhuma ligação criada ainda.</p>}</section>}
   </div>;
 }

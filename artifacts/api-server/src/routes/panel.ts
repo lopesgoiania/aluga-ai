@@ -221,11 +221,56 @@ router.get("/knowledge/suggestions", async (req: AuthRequest, res) => {
 router.get("/knowledge/learning", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);
   const [scans, suggestions, approved] = await Promise.all([
-    agentRest("agent_learning_scans", { params: { select: "session_id,scanned_at,last_human_message_at", order: "scanned_at.desc", limit: "100" } }),
+    agentRest("agent_learning_scans", { params: { select: "session_id,scanned_at,last_human_message_at,outcome,reason,channel_id", order: "scanned_at.desc", limit: "100" } }).catch(async (error) => {
+      if (!(error instanceof UpstreamError) || error.status !== 400) throw error;
+      return (await agentRest("agent_learning_scans", { params: { select: "session_id,scanned_at,last_human_message_at", order: "scanned_at.desc", limit: "100" } })).map((row: any) => ({ ...row, outcome: "analyzed", reason: null, channel_id: null }));
+    }),
     agentRest("agent_knowledge_suggestions", { params: { select: "id,session_id,suggested_title,status,created_at,reviewed_at", order: "created_at.desc", limit: "100" } }),
     agentRest("agent_knowledge", { params: { select: "id,title,approved_at,updated_at", source_type: "eq.conversation", status: "eq.approved", order: "approved_at.desc", limit: "100" } }),
   ]);
   res.json({ scans, suggestions, approved, sampleLimit: 100 });
+});
+const linkRelations = new Set(["complements", "requires", "applies_to", "contradicts", "hands_off_to"]);
+router.get("/knowledge/map", async (_req, res) => {
+  try {
+    const links = await agentRest("agent_knowledge_links", { params: { select: "id,from_id,to_id,relation,status,created_at,approved_at", status: "neq.archived", order: "created_at.asc", limit: "400" } });
+    res.json({ links, available: true });
+  } catch (error) {
+    if (!(error instanceof UpstreamError) || error.status !== 404) throw error;
+    res.json({ links: [], available: false });
+  }
+});
+router.post("/knowledge/links", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  const fromId = safeId(String(req.body?.fromId));
+  const toId = safeId(String(req.body?.toId));
+  const relation = String(req.body?.relation ?? "");
+  if (fromId === toId || !linkRelations.has(relation)) throw new UpstreamError("Relação inválida", 400);
+  const nodes = await agentRest("agent_knowledge", { params: { select: "id", id: `in.(${fromId},${toId})` } });
+  if (nodes.length !== 2) throw new UpstreamError("Escolha dois conhecimentos existentes", 404);
+  const rows = await agentRest("agent_knowledge_links", { method: "POST", params: { select: "*" }, body: { from_id: fromId, to_id: toId, relation, status: "draft", created_by: req.operator!.user_id }, headers: { Prefer: "return=representation" } });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "knowledge_link_created", details: { link_id: rows[0].id, from_id: fromId, to_id: toId, relation } } });
+  res.status(201).json({ link: rows[0] });
+});
+router.post("/knowledge/links/:id/approve", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const id = safeId(String(req.params.id));
+  const links = await agentRest("agent_knowledge_links", { params: { select: "*", id: `eq.${id}`, status: "eq.draft", limit: "1" } });
+  if (!links.length) throw new UpstreamError("Relação pendente não encontrada", 404);
+  const nodes = await agentRest("agent_knowledge", { params: { select: "id,status", id: `in.(${links[0].from_id},${links[0].to_id})` } });
+  if (nodes.length !== 2 || nodes.some((node: any) => node.status !== "approved")) throw new UpstreamError("Aprove primeiro os dois conhecimentos ligados", 409);
+  const rows = await agentRest("agent_knowledge_links", { method: "PATCH", params: { id: `eq.${id}`, status: "eq.draft", select: "*" }, body: { status: "approved", approved_by: req.operator!.user_id, approved_at: new Date().toISOString(), updated_at: new Date().toISOString() }, headers: { Prefer: "return=representation" } });
+  if (!rows.length) throw new UpstreamError("Relação foi alterada por outro usuário", 409);
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "knowledge_link_approved", details: { link_id: id } } });
+  res.json({ link: rows[0] });
+});
+router.post("/knowledge/links/:id/archive", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  const id = safeId(String(req.params.id));
+  const rows = await agentRest("agent_knowledge_links", { method: "PATCH", params: { id: `eq.${id}`, status: "neq.archived", select: "*" }, body: { status: "archived", approved_by: null, approved_at: null, updated_at: new Date().toISOString() }, headers: { Prefer: "return=representation" } });
+  if (!rows.length) throw new UpstreamError("Relação não encontrada", 404);
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "knowledge_link_archived", details: { link_id: id } } });
+  res.json({ link: rows[0] });
 });
 router.post("/knowledge/suggestions/:id/review", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);
@@ -1118,11 +1163,20 @@ router.get("/connection/qr", async (req: AuthRequest, res) => {
 });
 router.get("/alerts", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);
-  const [events, outbound] = await Promise.all([
+  const [events, outbound, channels, instances, health] = await Promise.all([
     agentRest("agent_events", { params: { select: "id,session_id,event_type,tool_name,success,error_message,created_at", success: "eq.false", order: "created_at.desc", limit: "100" } }),
     agentRest("panel_outbound", { params: { select: "id,session_id,operator_id,body,status,provider_message_id,created_at", status: "in.(reserved,uncertain)", order: "created_at.desc", limit: "100" } }),
+    agentRest("panel_channels", { params: { select: "id,display_name,instance_name", active: "eq.true" } }),
+    evolution("/instance/fetchInstances").catch(() => null),
+    agentRest("panel_channel_health", { params: { select: "channel_id,state,incident_open,incident_started_at,last_checked_at,consecutive_failures,last_notification_error", limit: "100" } }).catch(() => []),
   ]);
-  res.json({ events, outbound });
+  const connections = (channels as any[]).map((channel) => {
+    const live = Array.isArray(instances) ? instances.find((item: any) => item.name === channel.instance_name) : null;
+    const saved = (health as any[]).find((item) => item.channel_id === channel.id);
+    const state = instances === null ? "unreachable" : live?.connectionStatus ?? "missing";
+    return { ...channel, state, incidentOpen: saved?.incident_open ?? false, incidentStartedAt: saved?.incident_started_at ?? null, lastCheckedAt: saved?.last_checked_at ?? null, consecutiveFailures: saved?.consecutive_failures ?? 0, notificationError: saved?.last_notification_error ?? null };
+  });
+  res.json({ events, outbound, connections });
 });
 
 router.post("/alerts/outbound/:id/reconcile", async (req: AuthRequest, res) => {
