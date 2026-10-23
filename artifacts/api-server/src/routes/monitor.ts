@@ -29,9 +29,13 @@ router.get('/internal/monitor-connections', async (req, res, next) => {
       const webhookUrl = process.env.PANEL_ALERT_WEBHOOK_URL?.trim();
       if (health.incident_open && !wasNotified && webhookUrl) {
         try {
+          // The alert webhook has its own Header Auth credential in n8n. Never
+          // expose the Supabase service key in webhook requests or execution logs.
+          const alertSecret = process.env.PANEL_ALERT_WEBHOOK_SECRET?.trim();
+          if (!alertSecret) throw new Error('Segredo do webhook de alertas não configurado');
           const response = await fetch(webhookUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(process.env.PANEL_ALERT_WEBHOOK_SECRET ? { Authorization: `Bearer ${process.env.PANEL_ALERT_WEBHOOK_SECRET}` } : {}) },
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alertSecret}` },
             body: JSON.stringify({ event: 'whatsapp_disconnected', instance: channel.instance_name, state, detectedAt: new Date().toISOString() }),
             signal: AbortSignal.timeout(8000),
           });
