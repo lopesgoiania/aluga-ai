@@ -39,6 +39,18 @@ async function providerMessage(instance: string, providerId: string) {
   return found?.messages?.records?.[0] ?? found?.records?.[0] ?? null;
 }
 
+async function archiveOutboundMedia(instance: string, providerId: string, base64: string, mime: string) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(instance) || !/^[A-Za-z0-9_-]{1,128}$/.test(providerId)) throw new UpstreamError("ID de mídia inválido para arquivamento", 422);
+  const bytes = Buffer.from(base64, "base64");
+  const storagePath = `${instance}/${providerId}`;
+  const objectPath = storagePath.split("/").map(encodeURIComponent).join("/");
+  const stored = await fetch(`${config.agentUrl()}/storage/v1/object/eva-media/${objectPath}`, {
+    method: "POST", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}`, "Content-Type": mime, "x-upsert": "false" }, body: bytes, signal: AbortSignal.timeout(30000),
+  });
+  if (!stored.ok && stored.status !== 409) throw new UpstreamError("Não foi possível guardar a cópia privada da mídia", 502);
+  await agentRpc("agent_register_media_archive", { p_instance: instance, p_provider_message_id: providerId, p_storage_path: storagePath, p_mime_type: mime, p_size_bytes: bytes.length });
+}
+
 async function operatorFor(accessToken: string): Promise<Operator> {
   const user = await authRequest("user", { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!user?.id) throw new UpstreamError("Sessão expirada", 401);
@@ -205,6 +217,15 @@ router.get("/knowledge/suggestions", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);
   const suggestions = await agentRest("agent_knowledge_suggestions", { params: { select: "id,session_id,suggested_title,suggested_content,created_at", status: "eq.pending", order: "created_at.desc", limit: "100" } });
   res.json({ suggestions });
+});
+router.get("/knowledge/learning", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  const [scans, suggestions, approved] = await Promise.all([
+    agentRest("agent_learning_scans", { params: { select: "session_id,scanned_at,last_human_message_at", order: "scanned_at.desc", limit: "100" } }),
+    agentRest("agent_knowledge_suggestions", { params: { select: "id,session_id,suggested_title,status,created_at,reviewed_at", order: "created_at.desc", limit: "100" } }),
+    agentRest("agent_knowledge", { params: { select: "id,title,approved_at,updated_at", source_type: "eq.conversation", status: "eq.approved", order: "approved_at.desc", limit: "100" } }),
+  ]);
+  res.json({ scans, suggestions, approved, sampleLimit: 100 });
 });
 router.post("/knowledge/suggestions/:id/review", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);
@@ -896,6 +917,12 @@ router.post("/conversations/:id/reply", async (req: AuthRequest, res) => {
   await sessionFor(req, sessionId);
   const draft = String(req.body?.text ?? "").trim();
   const text = signedReply(req.operator!, draft);
+  const replyToId = req.body?.replyToMessageId ? safeId(String(req.body.replyToMessageId)) : null;
+  const quotedRows = replyToId ? await agentRest("chat_messages", { params: { select: "id,provider_message_id,metadata", id: `eq.${replyToId}`, session_id: `eq.${sessionId}`, limit: "1" } }) : [];
+  if (replyToId && (!quotedRows?.[0]?.provider_message_id || quotedRows[0].metadata?.delivery_status === "uncertain")) throw new UpstreamError("Esta mensagem não pode ser citada no WhatsApp", 409);
+  const quoteInstance = replyToId ? await instanceForSession(sessionId) : null;
+  const original = replyToId ? await providerMessage(quoteInstance!, quotedRows[0].provider_message_id) : null;
+  if (replyToId && !original?.message) throw new UpstreamError("A mensagem original não está mais disponível para resposta no WhatsApp", 409);
   const requestKey = safeId(String(req.body?.requestKey ?? randomUUID()));
   if (!draft || text.length > 4000) throw new UpstreamError("Mensagem deve ter até 4.000 caracteres com a assinatura", 400);
   const reservation = await agentRpc("panel_takeover_and_reserve_outbound", { p_session_id: sessionId, p_operator_id: req.operator!.user_id, p_request_key: requestKey, p_body: text });
@@ -904,15 +931,48 @@ router.post("/conversations/:id/reply", async (req: AuthRequest, res) => {
     const sessions = await agentRest("chat_sessions", { params: { select: "phone", id: `eq.${sessionId}`, limit: "1" } });
     const number = String(sessions?.[0]?.phone ?? "").replace(/@s\.whatsapp\.net$/, "").replace(/\D/g, "");
     if (!number) throw new UpstreamError("Telefone da conversa ausente", 422);
-    const response = await evolution(`/message/sendText/${encodeURIComponent(await instanceForSession(sessionId))}`, { method: "POST", body: JSON.stringify({ number, text }) }, 30000);
+    const instance = quoteInstance ?? await instanceForSession(sessionId);
+    const quoted = original ? { key: original.key, message: original.message } : undefined;
+    const response = await evolution(`/message/sendText/${encodeURIComponent(instance)}`, { method: "POST", body: JSON.stringify({ number, text, ...(quoted ? { quoted } : {}) }) }, 30000);
     const providerId = response?.key?.id ?? response?.data?.key?.id ?? response?.message?.key?.id;
     if (!providerId || typeof providerId !== "string") throw new UpstreamError("Evolution não confirmou o ID da mensagem; verifique antes de reenviar", 502);
     const result = await agentRpc("panel_confirm_outbound", { p_request_key: requestKey, p_provider_message_id: providerId });
-    res.json({ ...result, requestKey });
+    const savedQuote = replyToId ? await agentRest("chat_messages", { method: "PATCH", params: { session_id: `eq.${sessionId}`, provider_message_id: `eq.${providerId}` }, body: { reply_to_provider_message_id: quotedRows[0].provider_message_id } }).then(() => true, () => false) : true;
+    res.json({ ...result, requestKey, warning: savedQuote ? undefined : "Resposta enviada; a referência da mensagem precisa ser atualizada no histórico." });
   } catch (error) {
     await agentRpc("panel_mark_uncertain_outbound", { p_request_key: requestKey, p_reason: errorText(error) }).catch(() => undefined);
     res.status(202).json({ status: "uncertain", requestKey, message: "Envio sem confirmação completa. Confira a conversa antes de tentar novamente." });
   }
+});
+
+router.post("/conversations/:id/messages/:messageId/delete", async (req: AuthRequest, res) => {
+  const session = await sessionFor(req, String(req.params.id));
+  const messageId = safeId(String(req.params.messageId));
+  const handoffs = await agentRest("human_handoffs", { params: { select: "assigned_to,status", session_id: `eq.${session.id}`, order: "created_at.desc", limit: "1" } });
+  const assigned = handoffs?.[0]?.assigned_to === req.operator!.display_name && ["active", "accepted", "em_atendimento"].includes(handoffs[0].status);
+  if (!assigned && !["admin", "supervisor"].includes(req.operator!.role)) throw new UpstreamError("Somente o responsável ou um gestor pode apagar esta mensagem no WhatsApp", 403);
+  const rows = await agentRest("chat_messages", { params: { select: "id,session_id,direction,sender_type,provider_message_id,message_type,deleted_at_provider,metadata", id: `eq.${messageId}`, session_id: `eq.${session.id}`, limit: "1" } });
+  const message = rows?.[0];
+  if (!message) throw new UpstreamError("Mensagem não encontrada", 404);
+  if (message.direction !== "outbound" || !message.provider_message_id) throw new UpstreamError("Só é possível apagar no WhatsApp mensagens enviadas por este número", 409);
+  if (message.deleted_at_provider) { res.json({ status: "already_deleted" }); return; }
+  const instance = typeof message.metadata?.instance === "string" ? message.metadata.instance : await instanceForSession(session.id);
+  if (!["text", "conversation", "extendedtextmessage"].includes(String(message.message_type ?? "text").toLowerCase())) {
+    const archived = await agentRest("chat_media_archive", { params: { select: "storage_path", instance_name: `eq.${instance}`, provider_message_id: `eq.${message.provider_message_id}`, limit: "1" } });
+    if (!archived?.[0]?.storage_path) throw new UpstreamError("Esta mídia ainda não tem cópia privada. A exclusão foi bloqueada para preservar o histórico.", 409);
+    const objectPath = String(archived[0].storage_path).split("/").map(encodeURIComponent).join("/");
+    const stored = await fetch(`${config.agentUrl()}/storage/v1/object/authenticated/eva-media/${objectPath}`, { method: "HEAD", headers: { apikey: config.agentKey(), Authorization: `Bearer ${config.agentKey()}` }, signal: AbortSignal.timeout(10000) }).catch(() => null);
+    if (!stored?.ok) throw new UpstreamError("Não foi possível confirmar a cópia privada. A exclusão foi bloqueada.", 409);
+  }
+  const remoteJid = String(session.phone ?? "").includes("@") ? String(session.phone) : `${String(session.phone ?? "").replace(/\D/g, "")}@s.whatsapp.net`;
+  if (!/^\d+@s\.whatsapp\.net$/.test(remoteJid)) throw new UpstreamError("Número do WhatsApp inválido", 422);
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, session_id: session.id, action: "message_delete_requested", details: { message_id: message.id, provider_message_id: message.provider_message_id, instance } } });
+  const response = await evolution(`/chat/deleteMessageForEveryone/${encodeURIComponent(instance)}`, { method: "DELETE", body: JSON.stringify({ id: message.provider_message_id, remoteJid, fromMe: true }) }, 30000);
+  if (response?.message?.protocolMessage?.type !== "REVOKE") throw new UpstreamError("O WhatsApp não confirmou a exclusão; confira a conversa antes de tentar novamente", 502);
+  const recorded = await agentRpc("agent_record_provider_delete", { p_instance: instance, p_provider_message_id: message.provider_message_id, p_remote_jid: remoteJid }).catch(() => ({ matched: false }));
+  if (!recorded?.matched) await agentRest("chat_messages", { method: "PATCH", params: { id: `eq.${message.id}`, session_id: `eq.${session.id}`, deleted_at_provider: "is.null" }, body: { deleted_at_provider: new Date().toISOString() } });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, session_id: session.id, action: "message_deleted_at_provider", details: { message_id: message.id, provider_message_id: message.provider_message_id, instance, recorded } } });
+  res.json({ status: "deleted", retained: true });
 });
 
 router.post("/conversations/:id/audio", async (req: AuthRequest, res) => {
@@ -935,7 +995,8 @@ router.post("/conversations/:id/audio", async (req: AuthRequest, res) => {
     if (!providerId || typeof providerId !== "string") throw new UpstreamError("Evolution não confirmou o áudio", 502);
     await agentRpc("panel_confirm_outbound", { p_request_key: requestKey, p_provider_message_id: providerId });
     const saved = await agentRest("chat_messages", { method: "PATCH", params: { session_id: `eq.${sessionId}`, provider_message_id: `eq.${providerId}` }, body: { content: "[Áudio]", normalized_content: "[Áudio enviado pelo atendente]", message_type: "audio", media_mime_type: mime, metadata: { source: "panel", instance, delivery_status: "sent", outbound_id: reservation.id } } }).then(() => true, () => false);
-    res.json({ status: "sent", requestKey, warning: saved ? undefined : "Áudio enviado, mas o histórico ainda precisa ser atualizado." });
+    const archived = await archiveOutboundMedia(instance, providerId, audio, mime).then(() => true, () => false);
+    res.json({ status: "sent", requestKey, warning: !saved ? "Áudio enviado, mas o histórico ainda precisa ser atualizado." : !archived ? "Áudio enviado; a cópia privada falhou. A exclusão desta mensagem ficará bloqueada até o arquivo ser preservado." : undefined });
   } catch (error) {
     await agentRpc("panel_mark_uncertain_outbound", { p_request_key: requestKey, p_reason: errorText(error) }).catch(() => undefined);
     res.status(202).json({ status: "uncertain", requestKey, message: "Envio de áudio sem confirmação completa. Confira a conversa antes de tentar novamente." });
@@ -967,7 +1028,8 @@ router.post("/conversations/:id/file", async (req: AuthRequest, res) => {
     if (!providerId || typeof providerId !== "string") throw new UpstreamError("Evolution não confirmou o arquivo", 502);
     await agentRpc("panel_confirm_outbound", { p_request_key: requestKey, p_provider_message_id: providerId });
     const saved = await agentRest("chat_messages", { method: "PATCH", params: { session_id: `eq.${sessionId}`, provider_message_id: `eq.${providerId}` }, body: { content: `[${kind === "sticker" ? "Figurinha" : kind === "image" ? "Imagem" : "Documento"}]`, normalized_content: null, message_type: kind, media_mime_type: mime, media_filename: fileName, metadata: { source: "panel", instance, delivery_status: "sent", outbound_id: reservation.id } } }).then(() => true, () => false);
-    res.json({ status: "sent", requestKey, warning: saved ? undefined : "Arquivo enviado, mas o histórico ainda precisa ser atualizado." });
+    const archived = await archiveOutboundMedia(instance, providerId, media, mime).then(() => true, () => false);
+    res.json({ status: "sent", requestKey, warning: !saved ? "Arquivo enviado, mas o histórico ainda precisa ser atualizado." : !archived ? "Arquivo enviado; a cópia privada falhou. A exclusão desta mensagem ficará bloqueada até o arquivo ser preservado." : undefined });
   } catch (error) {
     await agentRpc("panel_mark_uncertain_outbound", { p_request_key: requestKey, p_reason: errorText(error) }).catch(() => undefined);
     res.status(202).json({ status: "uncertain", requestKey, message: "Envio sem confirmação completa. Confira a conversa antes de tentar novamente." });

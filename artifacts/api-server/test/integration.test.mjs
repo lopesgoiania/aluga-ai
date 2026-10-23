@@ -13,6 +13,7 @@ const attendantId = '55555555-5555-4555-8555-555555555555';
 const contactId = '33333333-3333-4333-8333-333333333333';
 const outboundId = '66666666-6666-4666-8666-666666666666';
 const mediaId = '88888888-8888-4888-8888-888888888888';
+const textId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const teamId = '99999999-9999-4999-8999-999999999999';
 const otherTeamId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const otherSessionId = '77777777-7777-4777-8777-777777777777';
@@ -26,8 +27,12 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let sends = 0;
   let assignment = 'WhatsApp';
   let sentText = '';
+  let quotedId = '';
+  let deletedText = false;
+  let originalContent = 'Mensagem original para auditoria';
   let routedTarget = '';
   let archiveReady = false;
+  let outboundArchives = 0;
   let disconnected = false;
   let attendantRemoved = false;
   let invitationsSent = 0;
@@ -92,8 +97,9 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/rest/v1/contact_tags') return json([{ contact_id: contactId, tag_id: 't1' }]);
     if (url.pathname === '/rest/v1/tags') return json([{ id: 't1', slug: 'inquilino', name: 'Inquilino', color: '#22A06B' }]);
     if (url.pathname === '/rest/v1/chat_messages') {
-      if (req.method === 'PATCH') return json({});
-      if (url.searchParams.get('id') === `eq.${mediaId}`) return json([{ id: mediaId, provider_message_id: 'AUDIO-1', media_mime_type: 'audio/ogg', metadata: { instance: 'Teste' } }]);
+      if (req.method === 'PATCH') { const body = JSON.parse(await new Response(req).text()); if (url.searchParams.get('id') === `eq.${textId}`) { assert.deepEqual(Object.keys(body), ['deleted_at_provider']); deletedText = true; } return json({}); }
+      if (url.searchParams.get('id') === `eq.${mediaId}`) return json([{ id: mediaId, session_id: sessionId, direction: 'outbound', sender_type: 'human', provider_message_id: 'AUDIO-1', message_type: 'audio', media_mime_type: 'audio/ogg', metadata: { instance: 'Teste' } }]);
+      if (url.searchParams.get('id') === `eq.${textId}`) return json([{ id: textId, session_id: sessionId, direction: 'outbound', sender_type: 'human', provider_message_id: 'WA-TEXT-1', message_type: 'text', content: originalContent, metadata: { source: 'panel' } }]);
       return json([{ id: 'm1', session_id: sessionId, sender_type: 'client', direction: 'inbound', content: 'Olá', created_at: '2026-10-02T12:00:00Z' }, { id: mediaId, session_id: sessionId, message_type: 'audio', provider_message_id: 'AUDIO-1', metadata: { instance: 'Teste' } }]);
     }
     if (url.pathname === '/rest/v1/chat_media_archive') return json(archiveReady ? [{ storage_path: 'Teste/AUDIO-1', mime_type: 'audio/ogg', size_bytes: 14 }] : []);
@@ -120,6 +126,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname.startsWith('/storage/v1/object/aluga-internal-chat/')) {
       storedInternalAudio = await new Response(req).text(); return json({ Key: url.pathname });
     }
+    if (url.pathname.startsWith('/storage/v1/object/eva-media/')) { outboundArchives++; return json({ Key: url.pathname }); }
     if (url.pathname.startsWith('/storage/v1/object/authenticated/aluga-internal-chat/')) {
       res.writeHead(200, { 'Content-Type': 'audio/webm' }); res.end(storedInternalAudio); return;
     }
@@ -135,13 +142,16 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       return json([{ id: invitedId, title: 'Procedimento de captação', content: 'A equipe entra em contato com o proprietário.', audience: 'proprietario', status: 'approved', scope: 'global', source_type: 'manual', version: 1, updated_at: '2026-10-22T12:00:00Z' }]);
     }
     if (url.pathname === '/rest/v1/agent_events') return json(url.searchParams.get('event_type') === 'eq.agent_decision' ? [{ id: invitedId, session_id: sessionId, created_at: '2026-10-22T12:00:00Z', payload: { knowledge_gap: true, combined_content: 'Qual é a taxa de administração?', handoff_reason: 'Sem fonte aprovada' } }] : []);
+    if (url.pathname === '/rest/v1/agent_learning_scans') return json([{ session_id: sessionId, scanned_at: '2026-10-22T12:00:00Z' }]);
+    if (url.pathname === '/rest/v1/agent_knowledge_suggestions') return json([{ id: invitedId, session_id: sessionId, suggested_title: 'Procedimento', status: 'pending', created_at: '2026-10-22T12:01:00Z' }]);
     if (url.pathname === '/rest/v1/panel_outbound') return json(url.searchParams.has('session_id') ? [] : [{ id: outboundId, session_id: sessionId, body: 'Pendente', status: 'uncertain', created_at: '2026-10-02T12:00:00Z' }]);
     if (url.pathname === '/rest/v1/properties') return json([{ source_property_id: 'R-1', title: 'Galpão', city: 'Goiânia', area: 200 }]);
     if (url.pathname === '/instance/connectionState/Teste') return json({ instance: { state: 'open' } });
     if (url.pathname === '/instance/fetchInstances') return json([{ name: 'Teste', connectionStatus: 'open', ownerJid: '5562999999999@s.whatsapp.net' }]);
     if (url.pathname === '/instance/logout/Teste' && req.method === 'DELETE') { disconnected = true; return json({ status: 'SUCCESS' }); }
     if (url.pathname === '/chat/fetchProfilePictureUrl/Teste') { profileLookups++; return json({ profilePictureUrl: profileImageAvailable ? 'https://example.test/avatar.jpg' : '' }); }
-    if (url.pathname === '/chat/findMessages/Teste') return json({ messages: { records: [{ key: { id: 'AUDIO-1' } }] } });
+    if (url.pathname === '/chat/findMessages/Teste') { const body = JSON.parse(await new Response(req).text()); const id = body.where.key.id; return json({ messages: { records: [{ key: { id, remoteJid: sessionPhone, fromMe: id !== 'AUDIO-1' }, message: { conversation: originalContent } }] } }); }
+    if (url.pathname === '/chat/deleteMessageForEveryone/Teste') { const body = JSON.parse(await new Response(req).text()); assert.equal(body.fromMe, true); assert.equal(body.remoteJid, sessionPhone); deletedText = true; return json({ message: { protocolMessage: { type: 'REVOKE' } } }); }
     if (url.pathname === '/chat/getBase64FromMediaMessage/Teste') return json({ mimetype: 'audio/ogg', base64: Buffer.from('media').toString('base64') });
     if (url.pathname === '/rest/v1/rpc/panel_takeover_and_reserve_outbound') {
       const body = JSON.parse(await new Response(req).text());
@@ -151,10 +161,12 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       return json({ id: 'out1', status: created ? 'reserved' : 'sent', created });
     }
     if (url.pathname === '/rest/v1/rpc/panel_confirm_outbound') return json({ status: 'sent', provider_message_id: 'WA-1' });
+    if (url.pathname === '/rest/v1/rpc/agent_record_provider_delete') return json({ recorded: true, matched: false });
+    if (url.pathname === '/rest/v1/rpc/agent_register_media_archive') return json({ archived: true });
     if (url.pathname === '/rest/v1/rpc/panel_route_session') { const body = JSON.parse(await new Response(req).text()); routedTarget = body.p_target; return json({ target: routedTarget, assigned_to: 'Outra Pessoa' }); }
     if (url.pathname === '/rest/v1/rpc/panel_release_review_session') { routedTarget = 'reviewed_eva'; return json({ target: 'eva', reply_expected: true, pending: 1 }); }
     if (url.pathname === '/rest/v1/rpc/panel_reconcile_outbound') return json({ status: 'failed' });
-    if (url.pathname === '/message/sendText/Teste') { sentText = JSON.parse(await new Response(req).text()).text; sends++; return json({ key: { id: 'WA-1' } }); }
+    if (url.pathname === '/message/sendText/Teste') { const body = JSON.parse(await new Response(req).text()); sentText = body.text; quotedId = body.quoted?.key?.id ?? ''; sends++; return json({ key: { id: 'WA-1' } }); }
     if (url.pathname === '/message/sendWhatsAppAudio/Teste') { sends++; return json({ key: { id: 'WA-AUDIO-1' } }); }
     if (url.pathname === '/message/sendMedia/Teste') { sends++; return json({ key: { id: 'WA-FILE-1' } }); }
     json({ message: `Unknown ${url.pathname}` }, 404);
@@ -206,6 +218,9 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(knowledge.entries[0].audience, 'proprietario');
     const gaps = await (await get('/knowledge/gaps')).json();
     assert.equal(gaps.gaps[0].question, 'Qual é a taxa de administração?');
+    const learning = await (await get('/knowledge/learning')).json();
+    assert.equal(learning.scans.length, 1);
+    assert.equal(learning.suggestions[0].status, 'pending');
     const addKnowledge = await fetch(`${base}/knowledge`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Captação de imóvel', content: 'A equipe entra em contato com o proprietário.', audience: 'proprietario' }) });
     assert.equal(addKnowledge.status, 201);
     assert.equal((await addKnowledge.json()).entry.audience, 'proprietario');
@@ -274,6 +289,18 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal((await (await send()).json()).status, 'sent');
     assert.equal(sends, 1);
     assert.equal(sentText, '*Vilarinho:*\nMensagem de teste');
+    const quotedReply = await post(`/conversations/${sessionId}/reply`, { text: 'Resposta vinculada', requestKey: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', replyToMessageId: textId });
+    assert.equal((await quotedReply.json()).status, 'sent');
+    assert.equal(quotedId, 'WA-TEXT-1');
+    archiveReady = false;
+    assert.equal((await post(`/conversations/${sessionId}/messages/${mediaId}/delete`, {})).status, 409, 'Mídia sem arquivo privado não pode ser apagada');
+    archiveReady = true;
+    const deleteText = await post(`/conversations/${sessionId}/messages/${textId}/delete`, {});
+    assert.equal((await deleteText.json()).retained, true);
+    assert.equal(deletedText, true);
+    assert.equal(originalContent, 'Mensagem original para auditoria');
+    const deleteArchivedAudio = await post(`/conversations/${sessionId}/messages/${mediaId}/delete`, {});
+    assert.equal((await deleteArchivedAudio.json()).retained, true, 'Áudio arquivado pode ser apagado no WhatsApp sem apagar a cópia privada');
     const transfer = await fetch(`${base}/conversations/${sessionId}/route`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'operator', targetUserId: attendantId }) });
     assert.equal((await transfer.json()).target, 'operator');
     assert.equal(routedTarget, 'operator');
@@ -287,10 +314,11 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(routedTarget, 'reviewed_eva');
     const audio = await fetch(`${base}/conversations/${sessionId}/audio`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ requestKey: '99999999-9999-4999-8999-999999999999', mimeType: 'audio/ogg', base64: Buffer.from('recording').toString('base64') }) });
     assert.equal((await audio.json()).status, 'sent');
-    assert.equal(sends, 2);
+    assert.equal(sends, 3);
     const image = await fetch(`${base}/conversations/${sessionId}/file`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ requestKey: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', kind: 'image', mimeType: 'image/png', fileName: 'foto.png', base64: Buffer.from('image').toString('base64') }) });
     assert.equal((await image.json()).status, 'sent');
-    assert.equal(sends, 3);
+    assert.equal(sends, 4);
+    assert.equal(outboundArchives, 2, 'Áudio e imagem enviados também precisam de cópia privada');
     const attendantLogin = await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'attendant@example.test', password: 'test' }) });
     assert.equal(attendantLogin.status, 200);
     const attendantCookie = attendantLogin.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');

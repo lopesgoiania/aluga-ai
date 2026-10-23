@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, Check, FileText, Filter, Mic, Paperclip, Plus, Send, Smile, Sparkles, Square, Sticker, Trash2, UserRound, X } from 'lucide-react';
+import { ArrowLeft, Check, CornerUpLeft, FileText, Filter, Mic, Paperclip, Plus, Send, Smile, Sparkles, Square, Sticker, Trash2, UserRound, X } from 'lucide-react';
 import { api, dateTime, displayName, inboxCategory, phoneLabel, stateOf, type ConversationDetail, type MessageRow, type Operator, type SessionRow, type Tag } from './services/api';
 
 type Props = {
@@ -55,6 +55,7 @@ function Avatar({ session }: { session: SessionRow }) {
 export default function Inbox(props: Props) {
   const { operator, operators, routingReady, sessions, selected, detail, selectedId, setSelectedId, showList, setShowList, search, setSearch, busy, setBusy, refresh, refreshDetail, action, flash, humanQueue, error } = props;
   const [reply, setReply] = useState('');
+  const [replyTo, setReplyTo] = useState<MessageRow | null>(null);
   const [category, setCategory] = useState<'new' | 'mine' | 'others'>('new');
   const categoryInitialized = useRef(false);
   const [channel, setChannel] = useState('all');
@@ -112,7 +113,7 @@ export default function Inbox(props: Props) {
   }, [selected, operator]);
 
   useEffect(() => {
-    setReply(''); setEditing(false); setShowContext(false); setAvatarFailed(false); setAudioBlob(null); setAttachment(null); setAiOpen(false); setEmojiOpen(false); setTransferOpen(false);
+    setReply(''); setReplyTo(null); setEditing(false); setShowContext(false); setAvatarFailed(false); setAudioBlob(null); setAttachment(null); setAiOpen(false); setEmojiOpen(false); setTransferOpen(false);
     cancelRecording.current = true;
     if (recorder.current?.state === 'recording') recorder.current.stop();
     stream.current?.getTracks().forEach((track) => track.stop());
@@ -185,10 +186,21 @@ export default function Inbox(props: Props) {
     event.preventDefault(); if (!selected || !reply.trim() || busy) return;
     setBusy(true);
     try {
-      const result = await api<{ status: string; message?: string }>(`/conversations/${selected.id}/reply`, { method: 'POST', body: { text: reply.trim(), requestKey: crypto.randomUUID() } });
-      if (result.status === 'sent') { setReply(''); flash('Mensagem enviada.'); } else flash(result.message || 'Confira o envio antes de tentar novamente.');
+      const result = await api<{ status: string; message?: string; warning?: string }>(`/conversations/${selected.id}/reply`, { method: 'POST', body: { text: reply.trim(), replyToMessageId: replyTo?.id, requestKey: crypto.randomUUID() } });
+      if (result.status === 'sent') { setReply(''); setReplyTo(null); flash(result.warning || 'Mensagem enviada.'); } else flash(result.message || 'Confira o envio antes de tentar novamente.');
       await Promise.all([refresh(), refreshDetail(selected.id)]);
     } catch (error) { flash(error instanceof Error ? error.message : 'Falha ao enviar'); }
+    finally { setBusy(false); }
+  }
+
+  async function deleteMessage(message: MessageRow) {
+    if (!selected || busy || !window.confirm('Apagar esta mensagem para todos no WhatsApp? O conteúdo original continuará visível no histórico interno.')) return;
+    setBusy(true);
+    try {
+      await api(`/conversations/${selected.id}/messages/${message.id}/delete`, { method: 'POST', body: {} });
+      await refreshDetail(selected.id);
+      flash('Exclusão solicitada no WhatsApp. O conteúdo original permanece no histórico.');
+    } catch (issue) { flash(issue instanceof Error ? issue.message : 'Não foi possível apagar a mensagem no WhatsApp.'); }
     finally { setBusy(false); }
   }
 
@@ -250,8 +262,8 @@ export default function Inbox(props: Props) {
     setBusy(true);
     try {
       const base64 = await blobBase64(audioBlob);
-      const result = await api<{ status: string; message?: string }>(`/conversations/${selected.id}/audio`, { method: 'POST', body: { requestKey: crypto.randomUUID(), mimeType: audioBlob.type, base64 } });
-      if (result.status === 'sent') { setAudioBlob(null); flash('Áudio enviado.'); } else flash(result.message || 'Confira o envio do áudio antes de tentar novamente.');
+      const result = await api<{ status: string; message?: string; warning?: string }>(`/conversations/${selected.id}/audio`, { method: 'POST', body: { requestKey: crypto.randomUUID(), mimeType: audioBlob.type, base64 } });
+      if (result.status === 'sent') { setAudioBlob(null); flash(result.warning || 'Áudio enviado.'); } else flash(result.message || 'Confira o envio do áudio antes de tentar novamente.');
       await Promise.all([refresh(), refreshDetail(selected.id)]);
     } catch (error) { flash(error instanceof Error ? error.message : 'Falha ao enviar áudio'); }
     finally { setBusy(false); }
@@ -267,8 +279,8 @@ export default function Inbox(props: Props) {
     if (!selected || !attachment || busy || !canReply) return;
     setBusy(true);
     try {
-      const result = await api<{ status: string; message?: string }>(`/conversations/${selected.id}/file`, { method: 'POST', body: { requestKey: crypto.randomUUID(), kind: attachmentKind, mimeType: attachment.type, fileName: attachment.name, base64: await blobBase64(attachment) } });
-      if (result.status === 'sent') { setAttachment(null); flash('Arquivo enviado.'); } else flash(result.message || 'Confira o envio antes de tentar novamente.');
+      const result = await api<{ status: string; message?: string; warning?: string }>(`/conversations/${selected.id}/file`, { method: 'POST', body: { requestKey: crypto.randomUUID(), kind: attachmentKind, mimeType: attachment.type, fileName: attachment.name, base64: await blobBase64(attachment) } });
+      if (result.status === 'sent') { setAttachment(null); flash(result.warning || 'Arquivo enviado.'); } else flash(result.message || 'Confira o envio antes de tentar novamente.');
       await Promise.all([refresh(), refreshDetail(selected.id)]);
     } catch (issue) { flash(issue instanceof Error ? issue.message : 'Falha ao enviar arquivo'); }
     finally { setBusy(false); }
@@ -291,8 +303,9 @@ export default function Inbox(props: Props) {
       </div><div className="live-thread-body" aria-label="Mensagens da conversa">
         {needsHistoryReview(selected) && <div className="live-history-banner" role="status"><strong>LIA pausada nesta conversa</strong><span>O histórico anterior do WhatsApp ainda não foi verificado. Revise o contexto antes de liberar a LIA para este contato.</span><div className="live-history-actions"><button type="button" disabled={busy || !routingReady} onClick={() => void route('eva')}><Sparkles size={15} /> Liberar LIA nesta conversa</button><button type="button" className="secondary" disabled={busy || !routingReady} onClick={() => void route('new')}>Manter sem IA</button><span>A decisão vale só para esta conversa.</span></div></div>}
         {detail?.session.id === selected.id ? detail.messages.map((message) => <div className={`live-message ${message.direction === 'outbound' ? 'outbound' : ''}`} key={message.id}>
-          <small>{message.sender_type === 'ai' ? 'LIA' : message.sender_type === 'human' ? 'Atendente' : 'Cliente'} · {dateTime(message.created_at)}</small>
-          {message.deleted_at_provider && <small className="live-deleted-marker">Apagada no WhatsApp · original preservado aqui</small>}
+          <div className="live-message-head"><small>{message.sender_type === 'ai' ? 'LIA' : message.sender_type === 'human' ? 'Atendente' : 'Cliente'} · {dateTime(message.created_at)}</small><span className="live-message-controls">{canReply && message.provider_message_id && !message.deleted_at_provider && <button type="button" className="live-message-action" title="Responder esta mensagem" aria-label="Responder esta mensagem" onClick={() => { setReplyTo(message); composer.current?.focus(); }}><CornerUpLeft size={14} /></button>}{message.direction === 'outbound' && message.provider_message_id && !message.deleted_at_provider && (canReply || operator.role === 'admin' || operator.role === 'supervisor') && <button type="button" className="live-message-action danger" title="Apagar no WhatsApp, manter no histórico" aria-label="Apagar no WhatsApp, manter no histórico" disabled={busy} onClick={() => void deleteMessage(message)}><Trash2 size={14} /></button>}</span></div>
+          {message.deleted_at_provider && <small className="live-deleted-marker">Exclusão no WhatsApp registrada · original preservado aqui</small>}
+          {message.reply_to_provider_message_id && <div className="live-message-quote">Em resposta a: {(() => { const source = detail.messages.find((item) => item.provider_message_id === message.reply_to_provider_message_id); return source ? String(source.normalized_content || source.content || '[Mídia]').slice(0, 140) : 'mensagem anterior'; })()}</div>}
           <Media message={message} sessionId={selected.id} />
         </div>) : <p>Carregando histórico…</p>}<div ref={bottom} />
       </div><div className="live-thread-actions">
@@ -301,6 +314,7 @@ export default function Inbox(props: Props) {
         {canReply && <>
           {stateOf(selected) !== 'Humano assumiu' && <p className="live-takeover-note">Ao enviar, você assume esta conversa e a LIA é pausada.</p>}
           <div className="live-composer-shell">
+            {replyTo && <div className="live-reply-preview"><CornerUpLeft size={16} /><div><strong>Respondendo a {replyTo.sender_type === 'ai' ? 'LIA' : replyTo.sender_type === 'human' ? 'atendente' : 'cliente'}</strong><span>{String(replyTo.normalized_content || replyTo.content || '[Mídia]').slice(0, 160)}</span></div><button type="button" className="live-icon-button" title="Cancelar resposta" aria-label="Cancelar resposta" onClick={() => setReplyTo(null)}><X size={16} /></button></div>}
             {recording ? <div className="live-recording" role="status"><span className="live-recording-dot" /><strong>Gravando</strong><span className="live-recording-clock">{clockLabel(recordSeconds)}</span><div className="live-waveform" aria-hidden="true">{levels.map((level, index) => <i key={index} style={{ height: `${Math.round(8 + level * 24)}px` }} />)}</div><button className="live-icon-button danger" type="button" title="Cancelar gravação" aria-label="Cancelar gravação" onClick={() => stopRecording(false)}><Trash2 size={18} /></button><button className="live-icon-button primary" type="button" title="Concluir gravação" aria-label="Concluir gravação" onClick={() => stopRecording(true)}><Check size={19} /></button></div> : audioBlob ? <div className="live-draft-preview"><Mic size={18} /><div><strong>Áudio pronto</strong><small>Ouça antes de enviar · {clockLabel(recordSeconds)}</small></div><audio controls src={audioPreview} /><button className="live-icon-button" title="Descartar áudio" aria-label="Descartar áudio" onClick={() => setAudioBlob(null)}><X size={18} /></button><button className="live-icon-button primary" disabled={busy} title="Enviar áudio" aria-label="Enviar áudio" onClick={() => void sendAudio()}><Send size={18} /></button></div> : attachment ? <div className="live-draft-preview">{attachmentPreview ? <img src={attachmentPreview} alt="Prévia do anexo" /> : <FileText size={22} />}<div><strong>{attachment.name}</strong><small>{attachmentKind === 'sticker' ? 'Figurinha' : attachmentKind === 'image' ? 'Imagem' : 'Documento'} · {(attachment.size / 1024).toFixed(0)} KB</small></div><button className="live-icon-button" title="Remover anexo" aria-label="Remover anexo" onClick={() => setAttachment(null)}><X size={18} /></button><button className="live-icon-button primary" disabled={busy} title="Enviar anexo" aria-label="Enviar anexo" onClick={() => void sendFile()}><Send size={18} /></button></div> : <form ref={form} onSubmit={send} className="live-composer-modern"><textarea ref={composer} value={reply} onChange={(event) => setReply(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.current?.requestSubmit(); } }} placeholder="Digite uma mensagem" rows={2} /><div className="live-composer-toolbar">
               <input ref={fileInput} type="file" hidden accept="image/jpeg,image/png,image/webp,application/pdf,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx" onChange={(event) => { chooseAttachment(event.target.files?.[0]); event.target.value = ''; }} /><input ref={stickerInput} type="file" hidden accept="image/webp,.webp" onChange={(event) => { chooseAttachment(event.target.files?.[0], true); event.target.value = ''; }} />
               <button type="button" className="live-icon-button" title="Anexar imagem ou documento" aria-label="Anexar imagem ou documento" onClick={() => fileInput.current?.click()}><Paperclip size={19} /></button><div className="live-emoji-wrap"><button type="button" className="live-icon-button" title="Inserir emoji" aria-label="Inserir emoji" aria-expanded={emojiOpen} onClick={() => setEmojiOpen(!emojiOpen)}><Smile size={19} /></button>{emojiOpen && <div className="live-emoji-picker" role="dialog" aria-label="Escolher emoji">{emojis.map((emoji) => <button key={emoji} type="button" aria-label={`Inserir ${emoji}`} onClick={() => insertEmoji(emoji)}>{emoji}</button>)}</div>}</div><button type="button" className="live-icon-button" title="Anexar figurinha WebP" aria-label="Anexar figurinha WebP" onClick={() => stickerInput.current?.click()}><Sticker size={18} /></button>
