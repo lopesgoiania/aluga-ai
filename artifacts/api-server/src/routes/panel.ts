@@ -1097,8 +1097,18 @@ router.get("/connection/instances", async (_req, res) => {
   res.json({ instances: (Array.isArray(rows) ? rows : []).map((row: any) => ({ name: row.name, state: row.connectionStatus, profileName: row.profileName, number: row.ownerJid })) });
 });
 router.get("/channels", async (_req, res) => {
-  const channels = await agentRest("panel_channels", { params: { select: "id,instance_name,display_name,purpose,instructions,default_team_id,ai_enabled,learning_enabled,active", order: "display_name.asc" } });
+  const channels = await agentRest("panel_channels", { params: { select: "id,instance_name,display_name,purpose,instructions,default_team_id,ai_enabled,learning_enabled,auto_admit_new_conversations,active", order: "display_name.asc" } });
   res.json({ channels });
+});
+router.patch("/channels/:id/auto-admission", async (req: AuthRequest, res) => {
+  roleAllowed(req.operator!, ["admin"]);
+  if (typeof req.body?.enabled !== "boolean") throw new UpstreamError("Configuração de revisão inválida", 400);
+  const channel = await agentRpc("panel_set_channel_auto_admission", {
+    p_channel_id: safeId(String(req.params.id)),
+    p_operator_id: req.operator!.user_id,
+    p_enabled: req.body.enabled,
+  });
+  res.json({ channel });
 });
 router.patch("/channels/:id/learning", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);

@@ -42,6 +42,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let passwordUpdates = 0;
   let profileImageAvailable = true;
   let profileLookups = 0;
+  let autoAdmission = false;
   let sessionPhone = '5562999999999@s.whatsapp.net';
   const internalMessages = [];
   let storedInternalAudio = '';
@@ -105,7 +106,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       return json([{ id: 'm1', session_id: sessionId, sender_type: 'client', direction: 'inbound', content: 'Olá', created_at: '2026-10-02T12:00:00Z' }, { id: mediaId, session_id: sessionId, message_type: 'audio', provider_message_id: 'AUDIO-1', metadata: { instance: 'Teste' } }]);
     }
     if (url.pathname === '/rest/v1/chat_media_archive') return json(archiveReady ? [{ storage_path: 'Teste/AUDIO-1', mime_type: 'audio/ogg', size_bytes: 14 }] : []);
-    if (url.pathname === '/rest/v1/panel_channels') return json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', instance_name: 'Teste', display_name: 'Teste', ai_enabled: true, active: true }]);
+    if (url.pathname === '/rest/v1/panel_channels') return json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', instance_name: 'Teste', display_name: 'Teste', ai_enabled: true, auto_admit_new_conversations: autoAdmission, active: true }]);
     if (url.pathname === '/rest/v1/panel_teams') {
       if (req.method === 'PATCH') return json([{ id: teamId, name: 'Comercial', ai_enabled: true, active: true }]);
       return json([{ id: teamId, name: 'Comercial', ai_enabled: false, active: true }]);
@@ -175,6 +176,12 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/rest/v1/rpc/agent_register_media_archive') return json({ archived: true });
     if (url.pathname === '/rest/v1/rpc/panel_route_session') { const body = JSON.parse(await new Response(req).text()); routedTarget = body.p_target; return json({ target: routedTarget, assigned_to: 'Outra Pessoa' }); }
     if (url.pathname === '/rest/v1/rpc/panel_release_review_session') { routedTarget = 'reviewed_eva'; return json({ target: 'eva', reply_expected: true, pending: 1 }); }
+    if (url.pathname === '/rest/v1/rpc/panel_set_channel_auto_admission') {
+      const body = JSON.parse(await new Response(req).text());
+      assert.equal(body.p_operator_id, userId);
+      autoAdmission = body.p_enabled;
+      return json({ id: body.p_channel_id, auto_admit_new_conversations: autoAdmission });
+    }
     if (url.pathname === '/rest/v1/rpc/panel_reconcile_outbound') return json({ status: 'failed' });
     if (url.pathname === '/message/sendText/Teste') { const body = JSON.parse(await new Response(req).text()); sentText = body.text; quotedId = body.quoted?.key?.id ?? ''; sends++; return json({ key: { id: 'WA-1' } }); }
     if (url.pathname === '/message/sendWhatsAppAudio/Teste') { sends++; return json({ key: { id: 'WA-AUDIO-1' } }); }
@@ -282,6 +289,13 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(archivedMedia.status, 200);
     assert.equal(await archivedMedia.text(), 'archived-media');
     assert.equal((await (await get('/connection/instances')).json()).instances[0].name, 'Teste');
+    assert.equal((await (await get('/channels')).json()).channels[0].auto_admit_new_conversations, false);
+    const admissionPath = `/channels/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/auto-admission`;
+    const admission = (enabled, asCookie = cookie) => fetch(`${base}${admissionPath}`, { method: 'PATCH', headers: { Cookie: asCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+    assert.equal((await admission(true)).status, 200);
+    assert.equal((await (await get('/channels')).json()).channels[0].auto_admit_new_conversations, true);
+    assert.equal((await admission(false)).status, 200);
+    assert.equal((await (await get('/channels')).json()).channels[0].auto_admit_new_conversations, false);
     const updateTeam = await fetch(`${base}/teams/${teamId}`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Comercial', description: 'Locação', aiEnabled: true }) });
     assert.equal((await updateTeam.json()).team.ai_enabled, true);
     const removeTeam = await fetch(`${base}/teams/${teamId}`, { method: 'DELETE', headers: { Cookie: cookie } });
@@ -345,6 +359,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     const attendantLogin = await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'attendant@example.test', password: 'test' }) });
     assert.equal(attendantLogin.status, 200);
     const attendantCookie = attendantLogin.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
+    assert.equal((await admission(true, attendantCookie)).status, 403, 'Só administrador altera a revisão automática');
     const attendantGet = (path) => fetch(`${base}${path}`, { headers: { Cookie: attendantCookie } });
     assert.equal((await attendantGet(`/internal/media/${mediaId}`)).status, 200, 'Membro da equipe pode ouvir o áudio interno');
     assert.equal((await post('/internal/messages', { teamId: otherTeamId, body: 'Sem acesso' }, attendantCookie)).status, 403);
