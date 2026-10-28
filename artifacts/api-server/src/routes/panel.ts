@@ -1097,16 +1097,26 @@ router.get("/connection/instances", async (_req, res) => {
   res.json({ instances: (Array.isArray(rows) ? rows : []).map((row: any) => ({ name: row.name, state: row.connectionStatus, profileName: row.profileName, number: row.ownerJid })) });
 });
 router.get("/channels", async (_req, res) => {
-  const channels = await agentRest("panel_channels", { params: { select: "id,instance_name,display_name,purpose,instructions,default_team_id,ai_enabled,learning_enabled,auto_admit_new_conversations,active", order: "display_name.asc" } });
+  const channels = await agentRest("panel_channels", { params: { select: "id,instance_name,display_name,purpose,instructions,default_team_id,ai_enabled,learning_enabled,auto_admit_new_conversations,auto_admit_schedule_mode,auto_admit_start_time,auto_admit_end_time,active", order: "display_name.asc" } });
   res.json({ channels });
 });
 router.patch("/channels/:id/auto-admission", async (req: AuthRequest, res) => {
   roleAllowed(req.operator!, ["admin"]);
-  if (typeof req.body?.enabled !== "boolean") throw new UpstreamError("Configuração de revisão inválida", 400);
-  const channel = await agentRpc("panel_set_channel_auto_admission", {
+  const { enabled, mode, startTime, endTime } = req.body ?? {};
+  if (typeof enabled !== "boolean" || !["always", "window"].includes(mode)
+      || typeof startTime !== "string" || typeof endTime !== "string"
+      || !/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)
+      || !/^([01]\d|2[0-3]):[0-5]\d$/.test(endTime)
+      || (mode === "window" && startTime === endTime)) {
+    throw new UpstreamError("Configuração de horário inválida", 400);
+  }
+  const channel = await agentRpc("panel_configure_channel_auto_admission", {
     p_channel_id: safeId(String(req.params.id)),
     p_operator_id: req.operator!.user_id,
-    p_enabled: req.body.enabled,
+    p_enabled: enabled,
+    p_mode: mode,
+    p_start: startTime,
+    p_end: endTime,
   });
   res.json({ channel });
 });

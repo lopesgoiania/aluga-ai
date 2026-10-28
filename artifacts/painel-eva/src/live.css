@@ -239,6 +239,8 @@ button.live-row { cursor:pointer; }.live-row>span:first-of-type { flex:1; min-wi
 .live-channel-hint { margin-top:-7px; }
 .live-channel-status { padding:9px 11px; border-radius:8px; background:#eef5fb; }
 .live-channel-settings button { justify-self:start; }
+.live-channel-time-range { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; max-width:380px; }
+@media(max-width:520px) { .live-channel-time-range { grid-template-columns:1fr; } }
 
 /* Centro de conhecimento — mesma linguagem visual do painel, com mais espaço para leitura. */
 .knowledge-workspace { display:grid; gap:20px; color:#203447; }

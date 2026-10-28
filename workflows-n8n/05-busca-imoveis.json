@@ -1,0 +1,161 @@
+{
+  "name": "Lopes Aluga v2 — Etapa 6 — Busca de imóveis",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "properties",
+        "returnAll": true
+      },
+      "id": "7fa74001-8093-436c-8dde-979c3ce917ad",
+      "name": "Ler imóveis atuais do Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        640,
+        64
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "awN2R2NCLCz6S7lx",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "session_id"
+            },
+            {
+              "name": "contact_id"
+            },
+            {
+              "name": "phone"
+            },
+            {
+              "name": "batch_id"
+            },
+            {
+              "name": "qualification",
+              "type": "object"
+            },
+            {
+              "name": "decision",
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "id": "035c0756-33a5-43de-bd4f-1fab49f0ef12",
+      "name": "01 Entrada da busca",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        672,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $json;\nconst source = input.qualification || input.qualification_patch || input.decision?.qualification_patch || {};\nconst clean = v => v == null ? null : String(v).trim();\nconst number = v => { if (v == null || v === '') return null; const direct = Number(v); if (Number.isFinite(direct)) return direct; const n = Number(String(v).replace(/[^0-9,.-]/g,'').replace(/\\./g,'').replace(',','.')); return Number.isFinite(n) ? n : null; };\nconst regions = Array.isArray(source.regioes) ? source.regioes.map(clean).filter(Boolean) : (clean(source.regiao) ? [clean(source.regiao)] : []);\nreturn [{json:{...input,search_filters:{transaction_type:'Aluguel',city:clean(source.cidade)||'Goiânia',regions,property_type:clean(source.tipo_imovel),min_area:number(source.area_minima),max_area:number(source.area_maxima),min_price:number(source.valor_minimo),max_price:number(source.valor_maximo),bedrooms:number(source.quartos),bathrooms:number(source.banheiros),parking:number(source.vagas),limit:5}}}];"
+      },
+      "id": "8412e88e-e3d7-479a-a0a1-ffb571e8856b",
+      "name": "02 Preparar filtros",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('02 Preparar filtros').first().json;\nconst f = ctx.search_filters;\nconst norm=(v)=>String(v??'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().trim();\nconst money=(v)=>v==null?'não informado':Number(v).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});\nconst typeMap={apartamento:['apartment','apartamento','flat'],casa:['house','casa','sobrado'],studio:['studio','kitnet','loft'],comercial:['commercial','comercial','sala','loja','shed_deposit_warehouse'],galpao:['shed_deposit_warehouse','galpao','galpao','warehouse','deposito'],deposito:['shed_deposit_warehouse','deposito','warehouse']};\nconst wantedType=norm(f.property_type);\nconst candidates=$input.all().map(i=>i.json).filter(p=>{\n const trans=norm(p.context_transaction_type||p.transaction_type);\n const price=Number(p.rental_price ?? p.price);\n if(trans && !trans.includes('alug')) return false;\n if(f.city && norm(p.city)!==norm(f.city)) return false;\n if(f.min_area!=null && (p.area==null || Number(p.area)<f.min_area)) return false;\n if(f.max_area!=null && (p.area==null || Number(p.area)>f.max_area)) return false;\n if(f.min_price!=null && price<f.min_price) return false;\n if(f.max_price!=null && price>f.max_price) return false;\n if(f.bedrooms!=null && Number(p.bedrooms||0)<f.bedrooms) return false;\n if(f.bathrooms!=null && Number(p.bathrooms||0)<f.bathrooms) return false;\n if(f.parking!=null && Number(p.parking||0)<f.parking) return false;\n if(wantedType){ const allowed=typeMap[wantedType]||[wantedType]; if(!allowed.some(t=>norm(p.property_type).includes(t)||norm(p.title).includes(t))) return false; }\n return true;\n}).map(p=>{\n let score=0; const hay=norm([p.neighborhood,p.address,p.title].filter(Boolean).join(' '));\n const matchedRegions=f.regions.filter(r=>hay.includes(norm(r)));\n if(matchedRegions.length) score+=40;\n else if(f.regions.length) score-=25;\n if(f.max_price!=null){ const price=Number(p.rental_price??p.price); score+=Math.max(0,20-Math.abs(f.max_price-price)/Math.max(f.max_price,1)*20); }\n score+=Math.min(Number(p.bedrooms||0),5)*2;\n return {...p,_score:score,_matched_regions:matchedRegions};\n}).filter(p=>!f.regions.length||p._matched_regions.length).sort((a,b)=>b._score-a._score||Number(a.rental_price??a.price)-Number(b.rental_price??b.price)).slice(0,f.limit);\nreturn [{json:{session_id:ctx.session_id,contact_id:ctx.contact_id||null,phone:ctx.phone||null,batch_id:ctx.batch_id||null,filters:f,count:candidates.length,properties:candidates,money}}];"
+      },
+      "id": "dc5135b8-44fb-46a0-aaf9-69d713e23eaa",
+      "name": "04 Filtrar e ranquear",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data=$json;\nconst money=v=>v==null?'Valor sob consulta':Number(v).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});\nlet reply;\nif(!data.properties.length){const place=data.filters.regions?.length?'nessa região':'em '+(data.filters.city||'Goiânia');reply='No catálogo atual, não encontrei opções '+place+' com esses critérios. Quer que eu amplie a busca?'}\nelse {\n const list=data.properties.slice(0,3);\n const intro=list.length===1?'Achei esta opção para você:':'Achei estas opções para você:';\n const blocks=list.map((p,i)=>{\n  const title=p.title||p.property_type||'Imóvel';\n  const location=p.neighborhood||p.city||data.filters.city;\n  const facts=[p.area!=null?Number(p.area)+' m²':null,money(p.rental_price??p.price)].filter(Boolean).join(' · ');\n  return (i+1)+'. '+title+' — '+location+'\\n'+facts+(p.url?'\\n'+p.url:'');\n });\n reply=intro+'\\n\\n'+blocks.join('\\n\\n')+'\\n\\nAlgum imóvel te interessou? Se quiser visitar, me diga qual.';\n}\nreturn [{json:{...data,reply,action:'property_results',source:'buscaimoveis'}}];"
+      },
+      "id": "4045161a-f674-4b10-9e93-b705930c3f3b",
+      "name": "05 Montar resposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        304
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "01 Entrada da busca": {
+      "main": [
+        [
+          {
+            "node": "02 Preparar filtros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04 Filtrar e ranquear": {
+      "main": [
+        [
+          {
+            "node": "05 Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02 Preparar filtros": {
+      "main": [
+        [
+          {
+            "node": "Ler imóveis atuais do Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler imóveis atuais do Supabase": {
+      "main": [
+        [
+          {
+            "node": "04 Filtrar e ranquear",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "81dd32b5-fba0-432d-a992-d23db4385229",
+  "meta": {
+    "instanceId": "2f8f67f0881de45d71183e143df5c289678cf78618999a5f268d39ff80dac360"
+  },
+  "nodeGroups": [],
+  "id": "9Q6IB0rAzCqFjtgf",
+  "tags": []
+}

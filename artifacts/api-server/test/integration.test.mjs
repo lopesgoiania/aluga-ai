@@ -43,6 +43,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let profileImageAvailable = true;
   let profileLookups = 0;
   let autoAdmission = false;
+  let autoSchedule = { mode: 'always', startTime: '18:00', endTime: '08:00' };
   let sessionPhone = '5562999999999@s.whatsapp.net';
   const internalMessages = [];
   let storedInternalAudio = '';
@@ -106,7 +107,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       return json([{ id: 'm1', session_id: sessionId, sender_type: 'client', direction: 'inbound', content: 'Olá', created_at: '2026-10-02T12:00:00Z' }, { id: mediaId, session_id: sessionId, message_type: 'audio', provider_message_id: 'AUDIO-1', metadata: { instance: 'Teste' } }]);
     }
     if (url.pathname === '/rest/v1/chat_media_archive') return json(archiveReady ? [{ storage_path: 'Teste/AUDIO-1', mime_type: 'audio/ogg', size_bytes: 14 }] : []);
-    if (url.pathname === '/rest/v1/panel_channels') return json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', instance_name: 'Teste', display_name: 'Teste', ai_enabled: true, auto_admit_new_conversations: autoAdmission, active: true }]);
+    if (url.pathname === '/rest/v1/panel_channels') return json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', instance_name: 'Teste', display_name: 'Teste', ai_enabled: true, auto_admit_new_conversations: autoAdmission, auto_admit_schedule_mode: autoSchedule.mode, auto_admit_start_time: autoSchedule.startTime, auto_admit_end_time: autoSchedule.endTime, active: true }]);
     if (url.pathname === '/rest/v1/panel_teams') {
       if (req.method === 'PATCH') return json([{ id: teamId, name: 'Comercial', ai_enabled: true, active: true }]);
       return json([{ id: teamId, name: 'Comercial', ai_enabled: false, active: true }]);
@@ -176,11 +177,12 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/rest/v1/rpc/agent_register_media_archive') return json({ archived: true });
     if (url.pathname === '/rest/v1/rpc/panel_route_session') { const body = JSON.parse(await new Response(req).text()); routedTarget = body.p_target; return json({ target: routedTarget, assigned_to: 'Outra Pessoa' }); }
     if (url.pathname === '/rest/v1/rpc/panel_release_review_session') { routedTarget = 'reviewed_eva'; return json({ target: 'eva', reply_expected: true, pending: 1 }); }
-    if (url.pathname === '/rest/v1/rpc/panel_set_channel_auto_admission') {
+    if (url.pathname === '/rest/v1/rpc/panel_configure_channel_auto_admission') {
       const body = JSON.parse(await new Response(req).text());
       assert.equal(body.p_operator_id, userId);
       autoAdmission = body.p_enabled;
-      return json({ id: body.p_channel_id, auto_admit_new_conversations: autoAdmission });
+      autoSchedule = { mode: body.p_mode, startTime: body.p_start, endTime: body.p_end };
+      return json({ id: body.p_channel_id, auto_admit_new_conversations: autoAdmission, ...autoSchedule });
     }
     if (url.pathname === '/rest/v1/rpc/panel_reconcile_outbound') return json({ status: 'failed' });
     if (url.pathname === '/message/sendText/Teste') { const body = JSON.parse(await new Response(req).text()); sentText = body.text; quotedId = body.quoted?.key?.id ?? ''; sends++; return json({ key: { id: 'WA-1' } }); }
@@ -291,9 +293,11 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal((await (await get('/connection/instances')).json()).instances[0].name, 'Teste');
     assert.equal((await (await get('/channels')).json()).channels[0].auto_admit_new_conversations, false);
     const admissionPath = `/channels/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/auto-admission`;
-    const admission = (enabled, asCookie = cookie) => fetch(`${base}${admissionPath}`, { method: 'PATCH', headers: { Cookie: asCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+    const admission = (enabled, asCookie = cookie, schedule = { mode: 'window', startTime: '18:00', endTime: '08:00' }) => fetch(`${base}${admissionPath}`, { method: 'PATCH', headers: { Cookie: asCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled, ...schedule }) });
+    assert.equal((await admission(true, cookie, { mode: 'window', startTime: '18:00', endTime: '18:00' })).status, 400, 'Janela sem duração não é válida');
     assert.equal((await admission(true)).status, 200);
     assert.equal((await (await get('/channels')).json()).channels[0].auto_admit_new_conversations, true);
+    assert.equal((await (await get('/channels')).json()).channels[0].auto_admit_schedule_mode, 'window');
     assert.equal((await admission(false)).status, 200);
     assert.equal((await (await get('/channels')).json()).channels[0].auto_admit_new_conversations, false);
     const updateTeam = await fetch(`${base}/teams/${teamId}`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Comercial', description: 'Locação', aiEnabled: true }) });
