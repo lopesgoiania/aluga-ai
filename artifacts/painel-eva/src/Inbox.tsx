@@ -146,7 +146,7 @@ export default function Inbox(props: Props) {
     ['LIA ativa', 'Aguardando atendimento'].includes(stateOf(selected))
     || (stateOf(selected) === 'Humano assumiu' && assignedTo === operator.display_name)
   ));
-  const canClaim = Boolean(selected && stateOf(selected) === 'Humano assumiu' && !canReply && (operator.role === 'admin' || operator.role === 'supervisor'));
+  const canClaim = Boolean(selected && stateOf(selected) === 'Humano assumiu' && !canReply && (operator.is_superadmin || operator.permissions?.includes('claim_whatsapp')) && (operator.role !== 'attendant' || selected.handoff?.assigned_to === 'WhatsApp'));
 
   async function route(target: 'new' | 'operator' | 'eva' | 'team', targetId?: string) {
     if (!selected) return;

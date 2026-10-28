@@ -1,4 +1,4 @@
-export type Operator = { user_id: string; display_name: string; signature?: string | null; role: 'admin' | 'supervisor' | 'attendant' };
+export type Operator = { user_id: string; display_name: string; signature?: string | null; role: 'admin' | 'supervisor' | 'attendant'; is_superadmin?: boolean; permissions?: string[] };
 export type Tag = { id: string; slug: string; name: string; color: string };
 export type ContactRow = Record<string, unknown> & { id: string; phone?: string; name?: string; whatsapp_name?: string; push_name?: string; full_name?: string };
 export type HandoffRow = { id: string; status: string; assigned_to?: string | null; reason?: string; requested_at?: string; created_at: string };

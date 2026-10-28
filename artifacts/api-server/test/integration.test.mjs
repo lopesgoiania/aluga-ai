@@ -42,6 +42,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let passwordUpdates = 0;
   let profileImageAvailable = true;
   let profileLookups = 0;
+  let includeOtherInstance = false;
+  const rolePermissions = new Map(['admin', 'supervisor', 'attendant'].flatMap((role) => ['claim_whatsapp', 'reconnect_qr'].map((key) => [`${role}:${key}`, true])));
   let autoAdmission = false;
   let autoSchedule = { mode: 'always', startTime: '18:00', endTime: '08:00' };
   let sessionPhone = '5562999999999@s.whatsapp.net';
@@ -77,13 +79,18 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/rest/v1/panel_operators') {
       if (req.method === 'PATCH') {
         if (url.searchParams.get('user_id') === `eq.${attendantId}`) { attendantRemoved = true; return json([{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: false }]); }
-        return json([{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true }]);
+        return json([{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true, is_superadmin: true }]);
       }
       if (req.method === 'POST') { const body = JSON.parse(await new Response(req).text()); if (body.user_id === attendantId) attendantRemoved = false; return json([{ user_id: body.user_id, display_name: body.display_name, role: body.role, active: true }]); }
       if (url.searchParams.get('active') === 'eq.true') return json([{ user_id: userId, display_name: 'Operador Teste', role: 'admin', active: true }, { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }]);
       if (url.searchParams.get('user_id') === `eq.${attendantId}`) return json([{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: !attendantRemoved }]);
       if (!url.searchParams.has('user_id')) return json([{ user_id: userId, display_name: 'Operador Teste', role: 'admin', active: true }, { user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }]);
-      return json(url.searchParams.get('user_id') === `eq.${attendantId}` ? [{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }] : [{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true }]);
+      return json(url.searchParams.get('user_id') === `eq.${attendantId}` ? [{ user_id: attendantId, display_name: 'Outra Pessoa', role: 'attendant', active: true }] : [{ user_id: userId, display_name: 'Operador Teste', signature: 'Vilarinho', role: 'admin', active: true, is_superadmin: true }]);
+    }
+    if (url.pathname === '/rest/v1/panel_role_permissions') {
+      if (req.method === 'POST') { const body = JSON.parse(await new Response(req).text()); rolePermissions.set(`${body.role}:${body.permission_key}`, body.allowed); return json([body]); }
+      const role = url.searchParams.get('role')?.replace(/^eq\./, '');
+      return json([...rolePermissions].map(([compound, allowed]) => { const [itemRole, permission_key] = compound.split(':'); return { role: itemRole, permission_key, allowed }; }).filter((item) => (!role || item.role === role) && (url.searchParams.get('allowed') !== 'eq.true' || item.allowed)));
     }
     if (url.pathname === '/rest/v1/chat_sessions') {
       const rows = [
@@ -95,7 +102,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/rest/v1/contacts') return json([{ id: contactId, name: 'Cliente Teste', phone: '5562999999999', metadata: {} }]);
     if (url.pathname === '/rest/v1/human_handoffs') {
       if (req.method === 'GET' && url.searchParams.has('assigned_to')) return json([]);
-      if (req.method === 'PATCH') { assert.equal(url.searchParams.get('assigned_to'), 'eq.WhatsApp'); assignment = 'Operador Teste'; return json([{ id: 'h1', session_id: sessionId, status: 'accepted', assigned_to: assignment }]); }
+      if (req.method === 'PATCH') { assert.equal(url.searchParams.get('assigned_to'), 'eq.WhatsApp'); const body = JSON.parse(await new Response(req).text()); assignment = body.assigned_to; return json([{ id: 'h1', session_id: sessionId, status: 'accepted', assigned_to: assignment }]); }
       return json([{ id: 'h1', session_id: sessionId, status: 'accepted', assigned_to: assignment, created_at: '2026-10-02T12:00:00Z' }]);
     }
     if (url.pathname === '/rest/v1/contact_tags') return json([{ contact_id: contactId, tag_id: 't1' }]);
@@ -107,7 +114,10 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       return json([{ id: 'm1', session_id: sessionId, sender_type: 'client', direction: 'inbound', content: 'Olá', created_at: '2026-10-02T12:00:00Z' }, { id: mediaId, session_id: sessionId, message_type: 'audio', provider_message_id: 'AUDIO-1', metadata: { instance: 'Teste' } }]);
     }
     if (url.pathname === '/rest/v1/chat_media_archive') return json(archiveReady ? [{ storage_path: 'Teste/AUDIO-1', mime_type: 'audio/ogg', size_bytes: 14 }] : []);
-    if (url.pathname === '/rest/v1/panel_channels') return json([{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', instance_name: 'Teste', display_name: 'Teste', ai_enabled: true, auto_admit_new_conversations: autoAdmission, auto_admit_schedule_mode: autoSchedule.mode, auto_admit_start_time: autoSchedule.startTime, auto_admit_end_time: autoSchedule.endTime, active: true }]);
+    if (url.pathname === '/rest/v1/panel_channels') {
+      const rows = [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', instance_name: 'Teste', display_name: 'Teste', default_team_id: teamId, ai_enabled: true, auto_admit_new_conversations: autoAdmission, auto_admit_schedule_mode: autoSchedule.mode, auto_admit_start_time: autoSchedule.startTime, auto_admit_end_time: autoSchedule.endTime, active: true }, { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', instance_name: 'Outro', display_name: 'Outro', default_team_id: otherTeamId, active: true }];
+      return json(url.searchParams.has('instance_name') ? rows.filter((row) => row.instance_name === url.searchParams.get('instance_name')?.slice(3)) : includeOtherInstance ? rows : rows.slice(0, 1));
+    }
     if (url.pathname === '/rest/v1/panel_teams') {
       if (req.method === 'PATCH') return json([{ id: teamId, name: 'Comercial', ai_enabled: true, active: true }]);
       return json([{ id: teamId, name: 'Comercial', ai_enabled: false, active: true }]);
@@ -157,7 +167,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/rest/v1/panel_outbound') return json(url.searchParams.has('session_id') ? [] : [{ id: outboundId, session_id: sessionId, body: 'Pendente', status: 'uncertain', created_at: '2026-10-02T12:00:00Z' }]);
     if (url.pathname === '/rest/v1/properties') return json([{ source_property_id: 'R-1', title: 'Galpão', city: 'Goiânia', area: 200 }]);
     if (url.pathname === '/instance/connectionState/Teste') return json({ instance: { state: 'open' } });
-    if (url.pathname === '/instance/fetchInstances') return json([{ name: 'Teste', connectionStatus: disconnected ? 'close' : 'open', ownerJid: '5562999999999@s.whatsapp.net' }]);
+    if (url.pathname === '/instance/connect/Teste') return json({ code: 'test-qr-code' });
+    if (url.pathname === '/instance/fetchInstances') return json([{ name: 'Teste', connectionStatus: disconnected ? 'close' : 'open', ownerJid: '5562999999999@s.whatsapp.net' }, ...(includeOtherInstance ? [{ name: 'Outro', connectionStatus: 'open' }] : [])]);
     if (url.pathname === '/rest/v1/panel_channel_health') return json([{ channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', state: disconnected ? 'close' : 'open', incident_open: healthFailures >= 2, consecutive_failures: healthFailures }]);
     if (url.pathname === '/rest/v1/rpc/panel_record_channel_health') { const body = JSON.parse(await new Response(req).text()); healthFailures = body.p_state === 'open' ? 0 : healthFailures + 1; return json({ incident_open: healthFailures >= 2, consecutive_failures: healthFailures }); }
     if (url.pathname === '/instance/logout/Teste' && req.method === 'DELETE') { disconnected = true; return json({ status: 'SUCCESS' }); }
@@ -375,10 +386,21 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal((await post(`/conversations/${otherSessionId}/reply`, { text: 'Não posso enviar' }, attendantCookie)).status, 403);
     assert.equal((await fetch(`${base}/operators/${attendantId}/teams`, { method: 'PUT', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ teamIds: [otherTeamId] }) })).status, 403);
     assert.equal((await attendantGet(`/conversations/${sessionId}`)).status, 200);
-    assert.equal((await fetch(`${base}/conversations/${sessionId}/claim`, { method: 'POST', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
+    assignment = 'WhatsApp';
+    const attendantClaim = await fetch(`${base}/conversations/${sessionId}/claim`, { method: 'POST', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: '{}' });
+    assert.equal(attendantClaim.status, 200, 'Atendente da equipe pode assumir conversa atendida pelo WhatsApp');
+    assert.equal((await attendantClaim.json()).assigned_to, 'Outra Pessoa');
     assert.equal((await attendantGet('/alerts')).status, 403);
     assert.equal((await fetch(`${base}/alerts/outbound/${outboundId}/reconcile`, { method: 'POST', headers: { Cookie: attendantCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'failed' }) })).status, 403);
-    assert.equal((await attendantGet('/connection/qr')).status, 403);
+    assert.equal((await attendantGet('/connection/instances/Teste/qr')).status, 200, 'Atendente da equipe pode obter QR Code');
+    includeOtherInstance = true;
+    assert.deepEqual((await (await attendantGet('/connection/instances')).json()).instances.map((item) => item.name), ['Teste'], 'Atendente só vê instâncias da própria equipe');
+    assert.equal((await attendantGet('/connection/instances/Outro/qr')).status, 403, 'QR Code de outra equipe fica protegido');
+    assert.equal((await attendantGet('/permissions/roles')).status, 403);
+    assert.equal((await get('/permissions/roles')).status, 200);
+    const revokeQr = await fetch(`${base}/permissions/roles/attendant/reconnect_qr`, { method: 'PUT', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ allowed: false }) });
+    assert.equal(revokeQr.status, 200);
+    assert.equal((await attendantGet('/connection/instances/Teste/qr')).status, 403, 'Permissão revogada deve valer imediatamente');
     const removeUser = await fetch(`${base}/operators/${attendantId}`, { method: 'DELETE', headers: { Cookie: cookie } });
     assert.equal((await removeUser.json()).historyPreserved, true);
     assert.equal((await attendantGet('/conversations')).status, 403, 'Acesso removido deve ser bloqueado mesmo com sessão aberta');

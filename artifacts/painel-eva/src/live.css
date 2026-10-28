@@ -137,6 +137,18 @@ button.live-row { cursor:pointer; }.live-row>span:first-of-type { flex:1; min-wi
 .live-sidebar.collapsed .nav-badge { position:absolute; top:0; right:0; }
 .live-sidebar.collapsed .live-sidebar-foot { justify-content:center; }
 .live-settings-stack { display:grid; gap:18px; align-content:start; }
+.role-permissions-card { display:grid; gap:18px; }
+.role-permissions-heading { display:flex; align-items:flex-start; gap:12px; color:#24588e; }
+.role-permissions-heading h2 { margin:0 0 5px; color:#203447; }
+.role-permissions-heading p,.role-permissions-note { margin:0; color:#60768a; font-size:12px; line-height:1.5; }
+.role-permissions-grid { display:grid; gap:10px; }
+.role-permission-row { display:grid; grid-template-columns:minmax(210px,1fr) auto; gap:16px; align-items:center; padding:16px; border:1px solid #dce6ef; border-radius:12px; background:#f8fbfe; }
+.role-permission-row strong,.role-permission-row small { display:block; }
+.role-permission-row small { margin-top:5px; color:#60768a; line-height:1.4; }
+.role-permission-switches { display:flex; flex-wrap:wrap; gap:12px; }
+.role-permission-switches label { display:flex; gap:6px; align-items:center; font-size:12px; white-space:nowrap; cursor:pointer; }
+.role-permission-switches input { accent-color:#2677c5; width:17px; height:17px; }
+@media(max-width:760px) { .role-permission-row { grid-template-columns:1fr; } }
 .live-tag-manager { width:min(650px,100%); }.live-tag-manager p { margin:0 0 14px; }
 .live-tag-form { display:flex; align-items:end; gap:9px; flex-wrap:wrap; margin-bottom:16px; }
 .live-tag-form label { display:grid; gap:5px; color:#60768a; font-size:11px; }.live-tag-form label:first-child { flex:1; min-width:180px; }

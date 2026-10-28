@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { agentRest, agentRpc, authRequest, catalogRest, config, evolution, UpstreamError } from "../lib/upstream";
 
 const router = Router();
-type Operator = { user_id: string; display_name: string; signature?: string | null; role: "admin" | "supervisor" | "attendant"; active: boolean };
+type Operator = { user_id: string; display_name: string; signature?: string | null; role: "admin" | "supervisor" | "attendant"; active: boolean; is_superadmin?: boolean; permissions?: string[] };
 type AuthRequest = Request & { operator?: Operator };
 const cookieOptions = { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict" as const, path: "/api" };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -55,13 +55,21 @@ async function operatorFor(accessToken: string): Promise<Operator> {
   const user = await authRequest("user", { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!user?.id) throw new UpstreamError("Sessão expirada", 401);
   let rows: any[];
-  try { rows = await agentRest("panel_operators", { params: { select: "user_id,display_name,signature,role,active", user_id: `eq.${user.id}`, limit: "1" } }); }
+  try { rows = await agentRest("panel_operators", { params: { select: "user_id,display_name,signature,role,active,is_superadmin", user_id: `eq.${user.id}`, limit: "1" } }); }
   catch (error) {
     if (!(error instanceof UpstreamError) || error.status !== 400) throw error;
     rows = await agentRest("panel_operators", { params: { select: "user_id,display_name,role,active", user_id: `eq.${user.id}`, limit: "1" } });
   }
   const operator = rows?.[0] as Operator | undefined;
   if (!operator?.active) throw new UpstreamError("Operador sem acesso ao painel", 403);
+  try {
+    const grants = await agentRest("panel_role_permissions", { params: { select: "permission_key", role: `eq.${operator.role}`, allowed: "eq.true" } });
+    operator.permissions = (grants as any[]).map((row) => String(row.permission_key));
+  } catch (error) {
+    if (!(error instanceof UpstreamError) || ![400, 404].includes(error.status)) throw error;
+    // A migration has not been applied yet: keep the old, restrictive behavior.
+    operator.permissions = operator.role === "admin" ? ["claim_whatsapp", "reconnect_qr"] : operator.role === "supervisor" ? ["claim_whatsapp"] : [];
+  }
   return operator;
 }
 
@@ -90,6 +98,9 @@ async function requireOperator(req: AuthRequest, res: Response, next: NextFuncti
 }
 const roleAllowed = (operator: Operator, roles: Operator["role"][]) => {
   if (!roles.includes(operator.role)) throw new UpstreamError("Sem permissão para esta ação", 403);
+};
+const permissionAllowed = (operator: Operator, key: string) => {
+  if (!operator.is_superadmin && !operator.permissions?.includes(key)) throw new UpstreamError("Sem permissão para esta ação", 403);
 };
 async function teamIdsFor(operator: Operator): Promise<Set<string>> {
   if (operator.role === "admin") return new Set();
@@ -149,6 +160,25 @@ router.get("/auth/me", (req, res, next) => {
 }, (req: AuthRequest, res) => res.json({ operator: req.operator }));
 
 router.use(requireOperator);
+
+const configurablePermissions = [
+  { key: "claim_whatsapp", label: "Assumir conversa atendida pelo WhatsApp", description: "Permite assumir uma conversa da própria equipe que está com o WhatsApp." },
+  { key: "reconnect_qr", label: "Reconectar WhatsApp por QR Code", description: "Permite gerar o QR Code de um canal da própria equipe quando ele cair." },
+] as const;
+router.get("/permissions/roles", async (req: AuthRequest, res) => {
+  if (!req.operator!.is_superadmin) throw new UpstreamError("Somente superadministradores podem gerenciar permissões", 403);
+  const rows = await agentRest("panel_role_permissions", { params: { select: "role,permission_key,allowed", order: "role.asc,permission_key.asc" } });
+  res.json({ permissions: configurablePermissions, roles: ["admin", "supervisor", "attendant"], grants: rows });
+});
+router.put("/permissions/roles/:role/:key", async (req: AuthRequest, res) => {
+  if (!req.operator!.is_superadmin) throw new UpstreamError("Somente superadministradores podem gerenciar permissões", 403);
+  const role = String(req.params.role);
+  const key = String(req.params.key);
+  if (!["admin", "supervisor", "attendant"].includes(role) || !configurablePermissions.some((item) => item.key === key) || typeof req.body?.allowed !== "boolean") throw new UpstreamError("Permissão inválida", 400);
+  const rows = await agentRest("panel_role_permissions", { method: "POST", params: { on_conflict: "role,permission_key", select: "role,permission_key,allowed" }, body: { role, permission_key: key, allowed: req.body.allowed, updated_by: req.operator!.user_id, updated_at: new Date().toISOString() }, headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
+  await agentRest("panel_audit_log", { method: "POST", body: { operator_id: req.operator!.user_id, action: "role_permission_updated", details: { role, key, allowed: req.body.allowed } } });
+  res.json({ grant: rows[0] });
+});
 
 router.post("/auth/change-password", async (req: AuthRequest, res) => {
   const currentPassword = String(req.body?.currentPassword ?? "");
@@ -921,7 +951,7 @@ router.post("/conversations/:id/assume", async (req: AuthRequest, res) => {
   res.json(result);
 });
 router.post("/conversations/:id/claim", async (req: AuthRequest, res) => {
-  roleAllowed(req.operator!, ["admin", "supervisor"]);
+  permissionAllowed(req.operator!, "claim_whatsapp");
   const session = await sessionFor(req, String(req.params.id));
   if (session.closed_at || session.ai_enabled || session.status !== "atendimento_humano") throw new UpstreamError("Atendimento humano não está ativo", 409);
   const [handoffs, pending] = await Promise.all([
@@ -930,6 +960,7 @@ router.post("/conversations/:id/claim", async (req: AuthRequest, res) => {
   ]);
   const handoff = handoffs?.[0];
   if (!handoff) throw new UpstreamError("Transferência humana ativa não encontrada", 409);
+  if (req.operator!.role === "attendant" && handoff.assigned_to !== "WhatsApp") throw new UpstreamError("Este atendimento já foi assumido por outro operador", 403);
   if (pending?.length) throw new UpstreamError("Há um envio sem confirmação nesta conversa. Confira os alertas antes de assumir.", 409);
   if (handoff.assigned_to === req.operator!.display_name) { res.json({ assigned_to: handoff.assigned_to }); return; }
   const previous = String(handoff.assigned_to ?? "");
@@ -1092,9 +1123,15 @@ router.get("/properties", async (req, res) => {
 router.get("/connection", async (_req, res) => {
   res.json({ instance: config.instance(), data: await evolution(`/instance/connectionState/${encodeURIComponent(config.instance())}`) });
 });
-router.get("/connection/instances", async (_req, res) => {
+router.get("/connection/instances", async (req: AuthRequest, res) => {
   const rows = await evolution("/instance/fetchInstances");
-  res.json({ instances: (Array.isArray(rows) ? rows : []).map((row: any) => ({ name: row.name, state: row.connectionStatus, profileName: row.profileName, number: row.ownerJid })) });
+  let visibleNames: Set<string> | null = null;
+  if (req.operator!.role !== "admin") {
+    const teams = await teamIdsFor(req.operator!);
+    const channels = await agentRest("panel_channels", { params: { select: "instance_name,default_team_id", active: "eq.true" } });
+    visibleNames = new Set((channels as any[]).filter((item) => teams.has(item.default_team_id)).map((item) => item.instance_name));
+  }
+  res.json({ instances: (Array.isArray(rows) ? rows : []).filter((row: any) => !visibleNames || visibleNames.has(row.name)).map((row: any) => ({ name: row.name, state: row.connectionStatus, profileName: row.profileName, number: row.ownerJid })) });
 });
 router.get("/channels", async (_req, res) => {
   const channels = await agentRest("panel_channels", { params: { select: "id,instance_name,display_name,purpose,instructions,default_team_id,ai_enabled,learning_enabled,auto_admit_new_conversations,auto_admit_schedule_mode,auto_admit_start_time,auto_admit_end_time,active", order: "display_name.asc" } });
@@ -1162,9 +1199,13 @@ router.post("/connection/instances", async (req: AuthRequest, res) => {
   res.status(201).json({ name, webhookConfigured: true });
 });
 router.get("/connection/instances/:name/qr", async (req: AuthRequest, res) => {
-  roleAllowed(req.operator!, ["admin"]);
+  permissionAllowed(req.operator!, "reconnect_qr");
   const name = String(req.params.name);
   if (!/^[a-zA-Z0-9_-]{3,48}$/.test(name)) throw new UpstreamError("Instância inválida", 400);
+  if (req.operator!.role !== "admin") {
+    const channels = await agentRest("panel_channels", { params: { select: "default_team_id", instance_name: `eq.${name}`, active: "eq.true", limit: "1" } });
+    if (!channels?.[0]?.default_team_id || !(await teamIdsFor(req.operator!)).has(channels[0].default_team_id)) throw new UpstreamError("Canal fora das suas equipes", 403);
+  }
   const rows = await evolution("/instance/fetchInstances");
   if (!Array.isArray(rows) || !rows.some((row: any) => row.name === name)) throw new UpstreamError("Instância não encontrada", 404);
   res.json({ instance: name, data: await evolution(`/instance/connect/${encodeURIComponent(name)}`) });
@@ -1187,7 +1228,11 @@ router.post("/connection/instances/:name/disconnect", async (req: AuthRequest, r
   res.json({ disconnected: true, result });
 });
 router.get("/connection/qr", async (req: AuthRequest, res) => {
-  roleAllowed(req.operator!, ["admin"]);
+  permissionAllowed(req.operator!, "reconnect_qr");
+  if (req.operator!.role !== "admin") {
+    const channels = await agentRest("panel_channels", { params: { select: "default_team_id", instance_name: `eq.${config.instance()}`, active: "eq.true", limit: "1" } });
+    if (!channels?.[0]?.default_team_id || !(await teamIdsFor(req.operator!)).has(channels[0].default_team_id)) throw new UpstreamError("Canal fora das suas equipes", 403);
+  }
   res.json({ instance: config.instance(), data: await evolution(`/instance/connect/${encodeURIComponent(config.instance())}`) });
 });
 router.get("/alerts", async (req: AuthRequest, res) => {
