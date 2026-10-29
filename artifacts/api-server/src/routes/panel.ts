@@ -11,6 +11,15 @@ const safeId = (id: string) => { if (!uuid.test(id)) throw new UpstreamError("ID
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Falha inesperada";
 const mediaTypes = new Set(["audio/ogg", "audio/mpeg", "audio/mp4", "audio/webm", "image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation"]);
 const profileCache = new Map<string, { url: string; until: number }>();
+const normalizeWhatsAppNumber = (value: unknown) => String(value ?? "").replace(/@.*$/, "").replace(/\D/g, "");
+const propertyImageUrl = (property: any) => {
+  const candidates = [property.image_url, property.cover_image_url, property.photo_url, property.thumbnail_url, ...(Array.isArray(property.images) ? property.images : []), ...(Array.isArray(property.photos) ? property.photos : [])];
+  for (const candidate of candidates) {
+    const url = typeof candidate === "string" ? candidate : candidate && typeof candidate === "object" ? candidate.url ?? candidate.src : null;
+    if (typeof url === "string" && /^https?:\/\//i.test(url)) return url;
+  }
+  return null;
+};
 
 async function sessionFor(req: AuthRequest, id: string) {
   const [sessions, handoffs] = await Promise.all([
@@ -88,9 +97,15 @@ async function requireOperator(req: AuthRequest, res: Response, next: NextFuncti
       operator = await operatorFor(token);
     } catch (error) {
       if (!(error instanceof UpstreamError) || error.status !== 401 || !req.cookies?.eva_refresh) throw error;
-      const refreshed = await authRequest("token?grant_type=refresh_token", { method: "POST", body: JSON.stringify({ refresh_token: req.cookies.eva_refresh }) });
-      operator = await operatorFor(refreshed.access_token);
-      setTokens(res, refreshed);
+      try {
+        const refreshed = await authRequest("token?grant_type=refresh_token", { method: "POST", body: JSON.stringify({ refresh_token: req.cookies.eva_refresh }) });
+        operator = await operatorFor(refreshed.access_token);
+        setTokens(res, refreshed);
+      } catch {
+        res.clearCookie("eva_access", cookieOptions);
+        res.clearCookie("eva_refresh", cookieOptions);
+        throw new UpstreamError("Sua sessão expirou. Entre novamente no Aluga Mais.", 401);
+      }
     }
     req.operator = operator;
     next();
@@ -164,6 +179,10 @@ router.use(requireOperator);
 const configurablePermissions = [
   { key: "claim_whatsapp", label: "Assumir conversa atendida pelo WhatsApp", description: "Permite assumir uma conversa da própria equipe que está com o WhatsApp." },
   { key: "reconnect_qr", label: "Reconectar WhatsApp por QR Code", description: "Permite gerar o QR Code de um canal da própria equipe quando ele cair." },
+  { key: "route_conversations", label: "Transferir conversas", description: "Permite transferir conversas entre novos, LIA, equipes e atendentes acessíveis." },
+  { key: "delete_messages", label: "Apagar mensagens no WhatsApp", description: "Permite solicitar a remoção de mensagens enviadas, mantendo o registro interno." },
+  { key: "manage_users", label: "Criar e gerenciar usuários", description: "Permite cadastrar, editar, remover e restaurar usuários da plataforma." },
+  { key: "manage_teams", label: "Criar e gerenciar equipes", description: "Permite criar, editar, remover equipes e ajustar a atuação da LIA." },
 ] as const;
 router.get("/permissions/roles", async (req: AuthRequest, res) => {
   if (!req.operator!.is_superadmin) throw new UpstreamError("Somente superadministradores podem gerenciar permissões", 403);
@@ -775,12 +794,19 @@ router.get("/conversations", async (req: AuthRequest, res) => {
   ).slice(0, 100);
   const ids = sessions.map((item) => item.contact_id).filter((id) => typeof id === "string" && uuid.test(id));
   const sessionIds = sessions.map((item) => item.id).filter((id) => typeof id === "string" && uuid.test(id));
-  const [contacts, handoffs, tagLinks, tags, recentMessages] = await Promise.all([
+  const [contacts, handoffs, tagLinks, tags, recentMessages, overview, channels, teams] = await Promise.all([
     ids.length ? agentRest("contacts", { params: { select: "*", id: `in.(${[...new Set(ids)].join(",")})` } }) : [],
     sessionIds.length ? agentRest("human_handoffs", { params: { select: "*", session_id: `in.(${sessionIds.join(",")})`, order: "created_at.desc", limit: "200" } }) : [],
     ids.length ? agentRest("contact_tags", { params: { select: "contact_id,tag_id", contact_id: `in.(${[...new Set(ids)].join(",")})`, removed_at: "is.null", limit: "500" } }) : [],
     agentRest("tags", { params: { select: "id,slug,name,color", active: "eq.true" } }),
     sessionIds.length ? agentRest("chat_messages", { params: { select: "session_id,metadata,direction,sender_type", session_id: `in.(${sessionIds.join(",")})`, order: "created_at.desc", limit: "1000" } }) : [],
+    sessionIds.length ? agentRpc("panel_inbox_overview", { p_session_ids: sessionIds }).catch((error: unknown) => {
+      // A prévia local também funciona antes da migração de leitura ser aplicada.
+      if (error instanceof Error && error.message.includes("panel_inbox_overview") && error.message.includes("schema cache")) return [];
+      throw error;
+    }) : [],
+    agentRest("panel_channels", { params: { select: "id,instance_name,ai_enabled,active,default_team_id", active: "eq.true" } }),
+    agentRest("panel_teams", { params: { select: "id,ai_enabled,active", active: "eq.true" } }),
   ]);
   const contactById = new Map((contacts as any[]).map((item) => [item.id, item]));
   const handoffBySession = new Map<string, any>();
@@ -791,10 +817,30 @@ router.get("/conversations", async (req: AuthRequest, res) => {
   const channelBySession = new Map<string, string>();
   for (const item of recentMessages as any[]) if (!channelBySession.has(item.session_id) && typeof item.metadata?.instance === "string") channelBySession.set(item.session_id, item.metadata.instance);
   const answeredByLIA = new Set((recentMessages as any[]).filter((item) => item.direction === "outbound" && item.sender_type === "ai").map((item) => item.session_id));
-  res.json({ conversations: sessions.filter((session) => visibleTo(req.operator!, session, handoffBySession.get(session.id), teamIds)).map((session) => ({ ...session, initial_new: !answeredByLIA.has(session.id), channel: channelBySession.get(session.id) ?? config.instance(), contact: contactById.get(session.contact_id) ?? null, handoff: handoffBySession.get(session.id) ?? null, tags: tagsByContact.get(session.contact_id) ?? [] })) });
+  const overviewBySession = new Map((overview as any[]).map((item) => [item.session_id, item]));
+  const channelById = new Map((channels as any[]).map((item) => [item.id, item]));
+  const teamById = new Map((teams as any[]).map((item) => [item.id, item]));
+  // Enquanto a migração aguarda aprovação, a lista ainda mostra a última mensagem.
+  const fallbackMessages = overviewBySession.size === 0 && sessionIds.length
+    ? await agentRest("chat_messages", { params: { select: "session_id,direction,created_at,content,normalized_content,message_type", session_id: `in.(${sessionIds.join(",")})`, order: "created_at.desc", limit: "1000" } })
+    : [];
+  for (const item of fallbackMessages as any[]) if (!overviewBySession.has(item.session_id)) overviewBySession.set(item.session_id, {
+    unread_count: 0,
+    last_message_at: item.created_at,
+    last_message_content: item.normalized_content || item.content,
+    last_message_type: item.message_type,
+    last_message_direction: item.direction,
+  });
+  res.json({ conversations: sessions.filter((session) => visibleTo(req.operator!, session, handoffBySession.get(session.id), teamIds)).map((session) => {
+    const channelConfig = channelById.get(session.channel_id);
+    const teamConfig = teamById.get(session.assigned_team_id ?? channelConfig?.default_team_id);
+    const liaEnabledForRoute = Boolean(channelConfig?.active && channelConfig?.ai_enabled && teamConfig?.active && teamConfig?.ai_enabled);
+    return { ...session, initial_new: !answeredByLIA.has(session.id), history_review_required: liaEnabledForRoute && !session.ai_enabled && session.metadata?.ai_admission === "unverified", channel: channelBySession.get(session.id) ?? channelConfig?.instance_name ?? config.instance(), contact: contactById.get(session.contact_id) ?? null, handoff: handoffBySession.get(session.id) ?? null, tags: tagsByContact.get(session.contact_id) ?? [], unread_count: overviewBySession.get(session.id)?.unread_count ?? 0, last_preview: overviewBySession.get(session.id)?.last_message_content ?? null, last_preview_type: overviewBySession.get(session.id)?.last_message_type ?? null, last_preview_direction: overviewBySession.get(session.id)?.last_message_direction ?? null, last_preview_at: overviewBySession.get(session.id)?.last_message_at ?? null };
+  }) });
 });
 
 router.post("/conversations/:id/route", async (req: AuthRequest, res) => {
+  permissionAllowed(req.operator!, "route_conversations");
   const target = String(req.body?.target ?? "");
   const targetUserId = req.body?.targetUserId == null ? null : safeId(String(req.body.targetUserId));
   const teamId = req.body?.teamId == null ? null : safeId(String(req.body.teamId));
@@ -835,10 +881,17 @@ router.get("/conversations/:id", async (req: AuthRequest, res) => {
   if (!session) throw new UpstreamError("Conversa não encontrada", 404);
   if (!visibleTo(req.operator!, session, handoffs?.[0], await teamIdsFor(req.operator!))) throw new UpstreamError("Conversa não autorizada", 403);
   const [messages, interests] = await Promise.all([
-    agentRest("chat_messages", { params: { select: "*", session_id: `eq.${id}`, order: "created_at.asc", limit: "200" } }),
+    agentRest("chat_messages", { params: { select: "*", session_id: `eq.${id}`, order: "created_at.desc", limit: "200" } }),
     agentRest("property_interests", { params: { select: "*", session_id: `eq.${id}`, order: "created_at.desc", limit: "50" } }),
   ]);
-  res.json({ session, messages, handoffs, interests });
+  res.json({ session, messages: (messages as any[]).reverse(), handoffs, interests });
+});
+
+router.post("/conversations/:id/read", async (req: AuthRequest, res) => {
+  const session = await sessionFor(req, String(req.params.id));
+  const messageId = safeId(String(req.body?.messageId ?? ""));
+  const readAt = await agentRpc("panel_mark_conversation_read", { p_session_id: session.id, p_message_id: messageId });
+  res.json({ readAt });
 });
 
 router.patch("/conversations/:id/contact", async (req: AuthRequest, res) => {
@@ -1021,7 +1074,31 @@ router.post("/conversations/:id/reply", async (req: AuthRequest, res) => {
   }
 });
 
+// Looks up a WhatsApp contact and opens an empty session in the selected
+// operational channel. No message is sent; the attendant decides what to do.
+router.post("/conversations/lookup", async (req: AuthRequest, res) => {
+  const rawNumber = normalizeWhatsAppNumber(req.body?.number);
+  if (!/^55\d{10,11}$/.test(rawNumber)) throw new UpstreamError("Informe um número brasileiro com DDD e WhatsApp", 400);
+  const instance = String(req.body?.instance ?? config.instance()).trim() || config.instance();
+  const check = await evolution(`/chat/whatsappNumbers/${encodeURIComponent(instance)}`, { method: "POST", body: JSON.stringify({ numbers: [rawNumber] }) }).catch(() => null);
+  const candidate = Array.isArray(check) ? check[0] : check?.data?.[0] ?? check?.[0];
+  if (candidate && (candidate.exists === false || candidate.isInWhatsapp === false)) throw new UpstreamError("Este número não está disponível no WhatsApp conectado", 422);
+  const jid = `${rawNumber}@s.whatsapp.net`;
+  const channels = await agentRest("panel_channels", { params: { select: "id,instance_name,default_team_id,active", instance_name: `eq.${instance}`, active: "eq.true", limit: "1" } });
+  const channel = channels?.[0];
+  if (!channel) throw new UpstreamError("A instância não está cadastrada como canal ativo no Aluga Mais", 409);
+  let contacts = await agentRest("contacts", { params: { select: "*", phone: `eq.${jid}`, limit: "1" } });
+  if (!contacts.length) contacts = await agentRest("contacts", { params: { select: "*", phone: `eq.${rawNumber}`, limit: "1" } });
+  const contact = contacts[0] ?? (await agentRest("contacts", { method: "POST", params: { select: "*" }, body: { phone: jid, metadata: { source: "panel_lookup", instance } }, headers: { Prefer: "return=representation" } }))[0];
+  if (!contact?.id) throw new UpstreamError("Não foi possível criar o contato no banco operacional", 502);
+  const sessions = await agentRest("chat_sessions", { params: { select: "*", contact_id: `eq.${contact.id}`, channel_id: `eq.${channel.id}`, closed_at: "is.null", status: "neq.encerrado", order: "created_at.desc", limit: "1" } });
+  const session = sessions[0] ?? (await agentRest("chat_sessions", { method: "POST", params: { select: "*" }, body: { contact_id: contact.id, phone: jid, channel_id: channel.id, assigned_team_id: channel.default_team_id ?? null, status: "novo", ai_enabled: false, metadata: { panel_queue: "new", source: "panel_lookup", instance } }, headers: { Prefer: "return=representation" } }))[0];
+  if (!session?.id) throw new UpstreamError("Não foi possível abrir a conversa no banco operacional", 502);
+  res.json({ session, contact, channel: instance });
+});
+
 router.post("/conversations/:id/messages/:messageId/delete", async (req: AuthRequest, res) => {
+  permissionAllowed(req.operator!, "delete_messages");
   const session = await sessionFor(req, String(req.params.id));
   const messageId = safeId(String(req.params.messageId));
   const handoffs = await agentRest("human_handoffs", { params: { select: "assigned_to,status", session_id: `eq.${session.id}`, order: "created_at.desc", limit: "1" } });
@@ -1113,11 +1190,12 @@ router.post("/conversations/:id/file", async (req: AuthRequest, res) => {
 });
 
 router.get("/properties", async (req, res) => {
-  const rows = await catalogRest("properties", { params: { select: "source_property_id,title,property_type,neighborhood,city,rental_price,price,area,bedrooms,parking,url,transaction_type,context_transaction_type,updated_at", order: "updated_at.desc", limit: "200" } });
+  const rows = await catalogRest("properties", { params: { select: "*", order: "updated_at.desc", limit: "200" } });
   res.json({ properties: (rows as any[]).map((property) => ({
     ...property,
     id: property.source_property_id,
     code: property.source_property_id,
+    image_url: propertyImageUrl(property),
   })) });
 });
 router.get("/connection", async (_req, res) => {

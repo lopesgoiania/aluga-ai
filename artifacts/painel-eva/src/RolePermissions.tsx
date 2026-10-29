@@ -22,8 +22,8 @@ export function RolePermissions({ flash }: { flash: (message: string) => void })
     finally { setSaving(''); }
   }
   return <section className="live-card role-permissions-card" aria-label="Poderes por cargo">
-    <div className="role-permissions-heading"><ShieldCheck size={22} /><div><h2>Superadmin · poderes por cargo</h2><p>Defina quem pode assumir atendimentos do WhatsApp e reconectar números. O acesso às conversas continua limitado às equipes do usuário.</p></div></div>
+    <div className="role-permissions-heading"><ShieldCheck size={22} /><div><h2>Super Admin · poderes por cargo</h2><p>Defina o que cada cargo pode fazer: atender, transferir, apagar mensagens, gerenciar usuários, equipes e conexões.</p></div></div>
     {!matrix ? <p>Carregando permissões…</p> : <div className="role-permissions-grid">{matrix.permissions.map((permission) => <div className="role-permission-row" key={permission.key}><div><strong>{permission.label}</strong><small>{permission.description}</small></div><div className="role-permission-switches">{matrix.roles.map((role) => { const allowed = matrix.grants.some((grant) => grant.role === role && grant.permission_key === permission.key && grant.allowed); return <label key={role}><input type="checkbox" checked={allowed} disabled={Boolean(saving)} onChange={() => void toggle(role, permission.key, allowed)} /><span>{roleLabel[role] ?? role}</span></label>; })}</div></div>)}</div>}
-    <p className="role-permissions-note">O superadministrador mantém acesso para recuperar configurações. Criar usuários, alterar equipes e desligar canais continuam restritos ao administrador.</p>
+    <p className="role-permissions-note">O superadministrador mantém acesso para recuperar configurações. O administrador continua sendo o gestor operacional; as permissões adicionais podem ser concedidas ou revogadas por cargo nesta matriz.</p>
   </section>;
 }

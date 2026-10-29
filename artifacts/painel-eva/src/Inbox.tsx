@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, Check, CornerUpLeft, FileText, Filter, Mic, Paperclip, Plus, Send, Smile, Sparkles, Square, Sticker, Trash2, UserRound, X } from 'lucide-react';
-import { api, dateTime, displayName, inboxCategory, phoneLabel, stateOf, type ConversationDetail, type MessageRow, type Operator, type SessionRow, type Tag } from './services/api';
+import { AlertTriangle, ArrowLeft, Check, CornerUpLeft, FileText, Filter, Mic, Paperclip, Plus, Search, Send, Smile, Sparkles, Square, Sticker, Trash2, UserRound, X } from 'lucide-react';
+import { api, displayName, inboxCategory, phoneLabel, stateOf, type ConversationDetail, type MessageRow, type Operator, type SessionRow, type Tag } from './services/api';
 
 type Props = {
   operator: Operator;
@@ -24,7 +24,23 @@ const panelFields = (session?: SessionRow) => {
 const clockLabel = (seconds: number) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
 const blobBase64 = (blob: Blob) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = reject; reader.readAsDataURL(blob); });
 const emojis = ['😀','😄','😊','🥰','😍','😉','👍','👏','🙌','🙏','❤️','💙','✨','🎉','🏠','🔑','📍','📅','🤝','✅','👋','💬','😅','😢','🤔','👀','🔥','💡','📞','🚀'];
-const needsHistoryReview = (session?: SessionRow) => Boolean(session && !session.ai_enabled && session.metadata?.ai_admission === 'unverified');
+const needsHistoryReview = (session?: SessionRow) => Boolean(session?.history_review_required);
+const shortWhen = (value?: string | null) => {
+  if (!value) return '';
+  const date = new Date(value);
+  const now = new Date();
+  if (new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', dateStyle: 'short' }).format(date) === new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', dateStyle: 'short' }).format(now)) return new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }).format(date);
+  return new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit' }).format(date);
+};
+const previewFor = (session: SessionRow) => {
+  const kind = session.last_preview_type?.toLowerCase();
+  if (kind === 'audio' || kind === 'ptt') return 'Áudio';
+  if (kind === 'image') return 'Imagem';
+  if (kind === 'sticker') return 'Figurinha';
+  if (kind === 'document' || kind === 'pdf') return 'Documento';
+  return session.last_preview?.trim() || 'Sem mensagens';
+};
+const searchPhone = (value: string) => value.replace(/\D/g, '');
 
 function Media({ message, sessionId }: { message: MessageRow; sessionId: string }) {
   const [failed, setFailed] = useState(false);
@@ -67,9 +83,13 @@ export default function Inbox(props: Props) {
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [availableTags, setAvailableTags] = useState<Tag[]>([]);
   const [availableTeams, setAvailableTeams] = useState<{ id: string; name: string; active: boolean }[]>([]);
+  const [availableChannels, setAvailableChannels] = useState<{ id: string; instance_name: string; display_name: string; active: boolean }[]>([]);
+  const [lookupInstance, setLookupInstance] = useState('');
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const [directSending, setDirectSending] = useState(false);
   useEffect(() => { void api<{ tags: Tag[] }>('/tags').then((result) => setAvailableTags(result.tags)).catch(() => undefined); }, []);
   useEffect(() => { void api<{ teams: { id: string; name: string; active: boolean }[] }>('/teams').then((result) => setAvailableTeams(result.teams.filter((team) => team.active))).catch(() => undefined); }, []);
+  useEffect(() => { void api<{ channels: { id: string; instance_name: string; display_name: string; active: boolean }[] }>('/channels').then((result) => { const active = result.channels.filter((item) => item.active); setAvailableChannels(active); setLookupInstance((current) => current || active[0]?.instance_name || ''); }).catch(() => undefined); }, []);
   async function setContactTag(tag: Tag, enabled: boolean) {
     if (!selected?.contact_id) return;
     setBusy(true);
@@ -78,6 +98,18 @@ export default function Inbox(props: Props) {
       await refresh(); flash(enabled ? 'Etiqueta adicionada.' : 'Etiqueta removida.');
     } catch (error) { flash(error instanceof Error ? error.message : 'Falha ao alterar etiqueta'); }
     finally { setBusy(false); }
+  }
+  async function openUnknownConversation() {
+    const number = searchPhone(search);
+    if (!/^55\d{10,11}$/.test(number)) { flash('Digite um número brasileiro completo com DDD.'); return; }
+    setDirectSending(true);
+    try {
+      const result = await api<{ session: SessionRow }>('/conversations/lookup', { method: 'POST', body: { number, instance: lookupInstance || (channel === 'all' ? undefined : channel) } });
+      await refresh();
+      setSelectedId(result.session.id); setShowList(false); setSearch('');
+      flash('Contato aberto para atendimento. Nenhuma mensagem foi enviada.');
+    } catch (issue) { flash(issue instanceof Error ? issue.message : 'Não foi possível iniciar a conversa'); }
+    finally { setDirectSending(false); }
   }
   const [editing, setEditing] = useState(false);
   const [showContext, setShowContext] = useState(false);
@@ -106,7 +138,21 @@ export default function Inbox(props: Props) {
   const form = useRef<HTMLFormElement | null>(null);
   const composer = useRef<HTMLTextAreaElement | null>(null);
   const bottom = useRef<HTMLDivElement | null>(null);
+  const lastMarkedRead = useRef('');
   const lastMessageId = detail?.messages.at(-1)?.id;
+
+  useEffect(() => {
+    const markVisible = () => {
+      if (!selected?.unread_count || detail?.session.id !== selected.id || !lastMessageId || document.hidden || (window.matchMedia('(max-width: 620px)').matches && showList)) return;
+      const key = `${selected.id}:${lastMessageId}`;
+      if (lastMarkedRead.current === key) return;
+      lastMarkedRead.current = key;
+      void api(`/conversations/${selected.id}/read`, { method: 'POST', body: { messageId: lastMessageId } }).then(refresh).catch(() => { lastMarkedRead.current = ''; });
+    };
+    markVisible();
+    document.addEventListener('visibilitychange', markVisible);
+    return () => document.removeEventListener('visibilitychange', markVisible);
+  }, [selected?.id, selected?.unread_count, detail?.session.id, lastMessageId, showList, refresh]);
 
   useEffect(() => {
     if (selected && !categoryInitialized.current) { setCategory(inboxCategory(selected, operator)); categoryInitialized.current = true; }
@@ -289,12 +335,13 @@ export default function Inbox(props: Props) {
   const panel = panelFields(selected);
   return <div className="live-inbox">
     <aside className={`live-conversation-list ${showList ? '' : 'live-mobile-hidden'}`}>
-      <div className="live-inbox-tabs" role="tablist" aria-label="Categorias de atendimento">{([['new','Novos'],['mine','Meus'],['others','Outros']] as const).map(([key,label]) => <button key={key} role="tab" aria-selected={category === key} className={category === key ? 'active' : ''} onClick={() => { setCategory(key); setSelectedId(sessions.find((session) => inboxCategory(session, operator) === key && !session.closed_at)?.id ?? ''); }}>{label}<span>{counts[key]}</span></button>)}</div>
-      <div className="live-list-search-row"><label className="live-search"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar conversa" /></label><button type="button" className={`live-filter-button ${filtersOpen ? 'active' : ''}`} title="Filtrar conversas" aria-label="Filtrar conversas" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(!filtersOpen)}><Filter size={18} /></button></div>
+      <div className="live-inbox-list-head"><div className="live-inbox-list-title"><h2>Conversas</h2><span>{sessions.reduce((total, session) => total + (session.unread_count || 0), 0)} não lidas</span></div>
+      <div className="live-list-search-row"><label className="live-search"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Pesquisar conversa" /></label><button type="button" className={`live-filter-button ${filtersOpen ? 'active' : ''}`} title="Filtrar conversas" aria-label="Filtrar conversas" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(!filtersOpen)}><Filter size={18} /></button></div>
+      <div className="live-inbox-tabs" role="tablist" aria-label="Categorias de atendimento">{([['new','Novos'],['mine','Meus'],['others','Outros']] as const).map(([key,label]) => <button key={key} role="tab" aria-selected={category === key} className={category === key ? 'active' : ''} onClick={() => { setCategory(key); setSelectedId(sessions.find((session) => inboxCategory(session, operator) === key && !session.closed_at)?.id ?? ''); }}>{label}<span>{counts[key]}</span></button>)}</div></div>
       {filtersOpen && <div className="live-filter-panel"><label>Etiqueta<select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="all">Todas</option>{availableTags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name}</option>)}</select></label><label>Responsável<select value={ownerFilter} onChange={(event) => setOwnerFilter(event.target.value)}><option value="all">Todos</option><option value="LIA">LIA</option><option value="Sem responsável">Sem responsável</option>{operators.map((item) => <option key={item.user_id} value={item.display_name}>{item.display_name}</option>)}<option value="WhatsApp">WhatsApp</option></select></label><label>Canal<select value={channel} onChange={(event) => setChannel(event.target.value)}><option value="all">Todos os números</option>{[...new Set(sessions.map((item) => item.channel).filter(Boolean))].map((value) => <option value={value} key={value}>{value}</option>)}</select></label><label>Situação<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="open">Em aberto</option><option value="all">Todas</option><option value="LIA ativa">LIA ativa</option><option value="Aguardando atendimento">Aguardando atendimento</option><option value="Humano assumiu">Humano assumiu</option><option value="Encerrada">Encerrada</option></select></label><button type="button" onClick={() => { setTagFilter('all'); setOwnerFilter('all'); setChannel('all'); setStatusFilter('open'); }}>Limpar filtros</button></div>}
-      {error ? <div className="live-error">{error}</div> : filtered.length ? filtered.map((session) => <button key={session.id} className={`live-conversation ${selectedId === session.id ? 'selected' : ''}`} onClick={() => { setSelectedId(session.id); setShowList(false); }}>
-        <Avatar session={session} /><span className="live-conversation-body"><b>{displayName(session)}</b><span className="live-list-tags">{session.tags.map((tag) => <span key={tag.id} style={{ borderColor: tag.color, color: tag.color }}>{tag.name}</span>)}</span><small>{phoneLabel(session.phone)} · {session.channel || 'WhatsApp'}</small>{needsHistoryReview(session) && <span className="live-history-warning">Histórico anterior não verificado</span>}<span className="live-state">{session.handoff?.assigned_to || stateOf(session)}</span></span>
-      </button>) : <div className="live-empty">Nenhuma conversa neste filtro.</div>}
+      {error ? <div className="live-error">{error}</div> : filtered.length ? filtered.map((session) => <button key={session.id} className={`live-conversation ${selectedId === session.id ? 'selected' : ''} ${session.unread_count ? 'has-unread' : ''}`} onClick={() => { setSelectedId(session.id); setShowList(false); }}>
+        <Avatar session={session} /><span className="live-conversation-body"><span className="live-conversation-top"><b>{displayName(session)}</b>{needsHistoryReview(session) && <AlertTriangle className="live-history-icon" size={14} aria-label="Histórico anterior não verificado" />}<time>{shortWhen(session.last_preview_at || session.last_message_at || session.created_at)}</time></span><span className="live-conversation-preview">{session.last_preview_direction === 'outbound' && <Check size={15} aria-label="Mensagem enviada" />}{previewFor(session)}</span><span className="live-list-tags">{session.tags.map((tag) => <span key={tag.id} style={{ borderColor: tag.color, color: tag.color }}>{tag.name}</span>)}</span><span className="live-list-bottom"><small>{session.channel || 'WhatsApp'} · {session.handoff?.assigned_to || stateOf(session)}</small>{Boolean(session.unread_count) && <span className="live-unread-count" aria-label={`${session.unread_count} mensagens não lidas`}>{session.unread_count! > 99 ? '99+' : session.unread_count}</span>}</span></span>
+      </button>) : <div className="live-empty live-empty-search">{/^55\d{10,11}$/.test(searchPhone(search)) ? <><strong>Nenhuma conversa encontrada</strong><span>Consultar este número no WhatsApp e abrir uma sessão vazia para atendimento.</span>{availableChannels.length > 1 && <select className="live-lookup-channel" value={lookupInstance} onChange={(event) => setLookupInstance(event.target.value)}><option value="">Escolha o canal</option>{availableChannels.map((item) => <option value={item.instance_name} key={item.id}>{item.display_name}</option>)}</select>}<button type="button" className="button button-primary" disabled={directSending || !lookupInstance && availableChannels.length > 1} onClick={() => void openUnknownConversation()}><UserRound size={15} /> {directSending ? 'Consultando…' : `Abrir contato · ${phoneLabel(searchPhone(search))}`}</button></> : 'Nenhuma conversa neste filtro.'}</div>}
     </aside>
     <section className={`live-thread ${showList ? 'live-mobile-hidden' : ''}`}>
       {selected ? <><div className="live-thread-head"><button className="live-back" onClick={() => setShowList(true)} aria-label="Voltar à lista"><ArrowLeft size={18} /></button>
@@ -303,10 +350,11 @@ export default function Inbox(props: Props) {
       </div><div className="live-thread-body" aria-label="Mensagens da conversa">
         {needsHistoryReview(selected) && <div className="live-history-banner" role="status"><strong>LIA pausada nesta conversa</strong><span>O histórico anterior do WhatsApp ainda não foi verificado. Revise o contexto antes de liberar a LIA para este contato.</span><div className="live-history-actions"><button type="button" disabled={busy || !routingReady} onClick={() => void route('eva')}><Sparkles size={15} /> Liberar LIA nesta conversa</button><button type="button" className="secondary" disabled={busy || !routingReady} onClick={() => void route('new')}>Manter sem IA</button><span>A decisão vale só para esta conversa.</span></div></div>}
         {detail?.session.id === selected.id ? detail.messages.map((message) => <div className={`live-message ${message.direction === 'outbound' ? 'outbound' : ''}`} key={message.id}>
-          <div className="live-message-head"><small>{message.sender_type === 'ai' ? 'LIA' : message.sender_type === 'human' ? 'Atendente' : 'Cliente'} · {dateTime(message.created_at)}</small><span className="live-message-controls">{canReply && message.provider_message_id && !message.deleted_at_provider && <button type="button" className="live-message-action" title="Responder esta mensagem" aria-label="Responder esta mensagem" onClick={() => { setReplyTo(message); composer.current?.focus(); }}><CornerUpLeft size={14} /></button>}{message.direction === 'outbound' && message.provider_message_id && !message.deleted_at_provider && (canReply || operator.role === 'admin' || operator.role === 'supervisor') && <button type="button" className="live-message-action danger" title="Apagar no WhatsApp, manter no histórico" aria-label="Apagar no WhatsApp, manter no histórico" disabled={busy} onClick={() => void deleteMessage(message)}><Trash2 size={14} /></button>}</span></div>
+          <div className="live-message-head"><small>{message.sender_type === 'ai' ? 'LIA' : message.sender_type === 'human' ? 'Atendente' : 'Cliente'}</small><span className="live-message-controls">{canReply && message.provider_message_id && !message.deleted_at_provider && <button type="button" className="live-message-action" title="Responder esta mensagem" aria-label="Responder esta mensagem" onClick={() => { setReplyTo(message); composer.current?.focus(); }}><CornerUpLeft size={14} /></button>}{message.direction === 'outbound' && message.provider_message_id && !message.deleted_at_provider && (canReply || operator.role === 'admin' || operator.role === 'supervisor') && <button type="button" className="live-message-action danger" title="Apagar no WhatsApp, manter no histórico" aria-label="Apagar no WhatsApp, manter no histórico" disabled={busy} onClick={() => void deleteMessage(message)}><Trash2 size={14} /></button>}</span></div>
           {message.deleted_at_provider && <small className="live-deleted-marker">Exclusão no WhatsApp registrada · original preservado aqui</small>}
           {message.reply_to_provider_message_id && <div className="live-message-quote">Em resposta a: {(() => { const source = detail.messages.find((item) => item.provider_message_id === message.reply_to_provider_message_id); return source ? String(source.normalized_content || source.content || '[Mídia]').slice(0, 140) : 'mensagem anterior'; })()}</div>}
           <Media message={message} sessionId={selected.id} />
+          <div className="live-message-foot"><time>{shortWhen(message.created_at)}</time>{message.direction === 'outbound' && <span title="Enviada pelo canal; confirmação de leitura ainda não disponível"><Check size={14} /></span>}</div>
         </div>) : <p>Carregando histórico…</p>}<div ref={bottom} />
       </div><div className="live-thread-actions">
         {['LIA ativa', 'Aguardando atendimento'].includes(stateOf(selected)) ? <button className="button button-primary" disabled={busy} onClick={() => void (routingReady ? route('operator', operator.user_id) : action('assume'))}>Assumir e pausar LIA</button> : null}

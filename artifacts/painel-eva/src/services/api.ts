@@ -2,9 +2,9 @@ export type Operator = { user_id: string; display_name: string; signature?: stri
 export type Tag = { id: string; slug: string; name: string; color: string };
 export type ContactRow = Record<string, unknown> & { id: string; phone?: string; name?: string; whatsapp_name?: string; push_name?: string; full_name?: string };
 export type HandoffRow = { id: string; status: string; assigned_to?: string | null; reason?: string; requested_at?: string; created_at: string };
-export type SessionRow = { id: string; contact_id?: string; channel?: string; phone: string; status: string; ai_enabled: boolean; ai_paused_reason?: string | null; initial_new?: boolean; metadata?: Record<string, unknown>; profile?: string; conversation_summary?: string; qualification_data?: Record<string, unknown>; last_message_at?: string; created_at: string; closed_at?: string | null; contact: ContactRow | null; handoff: HandoffRow | null; tags: Tag[] };
+export type SessionRow = { id: string; contact_id?: string; channel?: string; phone: string; status: string; ai_enabled: boolean; ai_paused_reason?: string | null; initial_new?: boolean; history_review_required?: boolean; unread_count?: number; last_preview?: string | null; last_preview_type?: string | null; last_preview_direction?: string | null; last_preview_at?: string | null; metadata?: Record<string, unknown>; profile?: string; conversation_summary?: string; qualification_data?: Record<string, unknown>; last_message_at?: string; created_at: string; closed_at?: string | null; contact: ContactRow | null; handoff: HandoffRow | null; tags: Tag[] };
 export type MessageRow = { id: string; provider_message_id?: string | null; reply_to_provider_message_id?: string | null; sender_type: string; direction: string; content?: string; normalized_content?: string; message_type?: string; media_url?: string; media_filename?: string; deleted_at_provider?: string | null; created_at: string; metadata?: Record<string, unknown> };
-export type PropertyRow = Record<string, unknown> & { id: string; title?: string; property_type?: string; neighborhood?: string; city?: string; rental_price?: number; price?: number; area?: number; bedrooms?: number; parking?: number; url?: string; code?: string; transaction_type?: string };
+export type PropertyRow = Record<string, unknown> & { id: string; title?: string; property_type?: string; neighborhood?: string; city?: string; rental_price?: number; price?: number; area?: number; bedrooms?: number; parking?: number; url?: string; code?: string; transaction_type?: string; image_url?: string | null };
 export type EventRow = { id: string; session_id?: string; event_type: string; tool_name?: string; error_message?: string; created_at: string };
 export type OutboundAlert = { id: string; session_id: string; body: string; status: 'reserved' | 'uncertain'; created_at: string };
 export type ConversationDetail = { session: SessionRow; messages: MessageRow[]; handoffs: HandoffRow[]; interests: Record<string, unknown>[] };
@@ -29,6 +29,7 @@ export const phoneLabel = (phone: string) => {
 };
 export const displayName = (session: SessionRow) => String(session.contact?.name || session.contact?.whatsapp_name || session.contact?.full_name || session.contact?.push_name || phoneLabel(session.phone));
 export const inboxCategory = (session: SessionRow, operator: Operator): 'new' | 'mine' | 'others' => {
+  if (session.ai_enabled) return 'others';
   const owner = session.handoff?.assigned_to?.trim();
   if (owner) return owner === operator.display_name ? 'mine' : 'others';
   return session.metadata?.panel_queue === 'new' || session.initial_new ? 'new' : 'others';

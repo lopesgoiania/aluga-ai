@@ -42,6 +42,7 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
   let passwordUpdates = 0;
   let profileImageAvailable = true;
   let profileLookups = 0;
+  let sharedUnread = 2;
   let includeOtherInstance = false;
   const rolePermissions = new Map(['admin', 'supervisor', 'attendant'].flatMap((role) => ['claim_whatsapp', 'reconnect_qr'].map((key) => [`${role}:${key}`, true])));
   let autoAdmission = false;
@@ -111,7 +112,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
       if (req.method === 'PATCH') { const body = JSON.parse(await new Response(req).text()); if (url.searchParams.get('id') === `eq.${textId}`) { assert.deepEqual(Object.keys(body), ['deleted_at_provider']); deletedText = true; } return json({}); }
       if (url.searchParams.get('id') === `eq.${mediaId}`) return json([{ id: mediaId, session_id: sessionId, direction: 'outbound', sender_type: 'human', provider_message_id: 'AUDIO-1', message_type: 'audio', media_mime_type: 'audio/ogg', metadata: { instance: 'Teste' } }]);
       if (url.searchParams.get('id') === `eq.${textId}`) return json([{ id: textId, session_id: sessionId, direction: 'outbound', sender_type: 'human', provider_message_id: 'WA-TEXT-1', message_type: 'text', content: originalContent, metadata: { source: 'panel' } }]);
-      return json([{ id: 'm1', session_id: sessionId, sender_type: 'client', direction: 'inbound', content: 'Olá', created_at: '2026-10-02T12:00:00Z' }, { id: mediaId, session_id: sessionId, message_type: 'audio', provider_message_id: 'AUDIO-1', metadata: { instance: 'Teste' } }]);
+      const rows = [{ id: 'm1', session_id: sessionId, sender_type: 'client', direction: 'inbound', content: 'Olá', created_at: '2026-10-02T12:00:00Z' }, { id: mediaId, session_id: sessionId, message_type: 'audio', provider_message_id: 'AUDIO-1', metadata: { instance: 'Teste' }, created_at: '2026-10-02T12:01:00Z' }];
+      return json(url.searchParams.get('order') === 'created_at.desc' ? rows.reverse() : rows);
     }
     if (url.pathname === '/rest/v1/chat_media_archive') return json(archiveReady ? [{ storage_path: 'Teste/AUDIO-1', mime_type: 'audio/ogg', size_bytes: 14 }] : []);
     if (url.pathname === '/rest/v1/panel_channels') {
@@ -171,6 +173,8 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     if (url.pathname === '/instance/fetchInstances') return json([{ name: 'Teste', connectionStatus: disconnected ? 'close' : 'open', ownerJid: '5562999999999@s.whatsapp.net' }, ...(includeOtherInstance ? [{ name: 'Outro', connectionStatus: 'open' }] : [])]);
     if (url.pathname === '/rest/v1/panel_channel_health') return json([{ channel_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', state: disconnected ? 'close' : 'open', incident_open: healthFailures >= 2, consecutive_failures: healthFailures }]);
     if (url.pathname === '/rest/v1/rpc/panel_record_channel_health') { const body = JSON.parse(await new Response(req).text()); healthFailures = body.p_state === 'open' ? 0 : healthFailures + 1; return json({ incident_open: healthFailures >= 2, consecutive_failures: healthFailures }); }
+    if (url.pathname === '/rest/v1/rpc/panel_inbox_overview') { const body = JSON.parse(await new Response(req).text()); return json(body.p_session_ids.map((id) => ({ session_id: id, unread_count: id === sessionId ? sharedUnread : 0, last_message_content: id === sessionId ? 'Olá' : null, last_message_type: 'text', last_message_direction: 'inbound', last_message_at: '2026-10-02T12:00:00Z' }))); }
+    if (url.pathname === '/rest/v1/rpc/panel_mark_conversation_read') { const body = JSON.parse(await new Response(req).text()); assert.equal(body.p_session_id, sessionId); assert.equal(body.p_message_id, textId); sharedUnread = 0; return json('2026-10-02T12:00:00Z'); }
     if (url.pathname === '/instance/logout/Teste' && req.method === 'DELETE') { disconnected = true; return json({ status: 'SUCCESS' }); }
     if (url.pathname === '/chat/fetchProfilePictureUrl/Teste') { profileLookups++; return json({ profilePictureUrl: profileImageAvailable ? 'https://example.test/avatar.jpg' : '' }); }
     if (url.pathname === '/chat/findMessages/Teste') { const body = JSON.parse(await new Response(req).text()); const id = body.where.key.id; return json({ messages: { records: [{ key: { id, remoteJid: sessionPhone, fromMe: id !== 'AUDIO-1' }, message: { conversation: originalContent } }] } }); }
@@ -235,6 +239,10 @@ test('autenticação, leitura dos três serviços e envio idempotente', async ()
     assert.equal(conversations.conversations.length, 2, 'Mesmo contato em canais distintos deve gerar duas conversas');
     assert.equal(conversations.conversations[0].contact.name, 'Cliente Teste');
     assert.equal(conversations.conversations[0].tags[0].slug, 'inquilino');
+    assert.equal(conversations.conversations.find((item) => item.id === sessionId).unread_count, 2);
+    assert.equal(conversations.conversations.find((item) => item.id === sessionId).last_preview, 'Olá');
+    assert.equal((await post(`/conversations/${sessionId}/read`, { messageId: textId })).status, 200);
+    assert.equal((await (await get('/conversations')).json()).conversations.find((item) => item.id === sessionId).unread_count, 0, 'Leitura compartilhada zera o aviso da equipe');
     assert.equal((await (await get('/operators')).json()).operators.length, 2);
     assert.equal((await (await get('/internal/directory')).json()).operators.length, 2);
     assert.ok((await (await get('/internal/conversations')).json()).latest);

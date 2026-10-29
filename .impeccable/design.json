@@ -1,0 +1,18 @@
+{
+  "name": "Aluga Mais Aurora Green Glass",
+  "version": 1,
+  "direction": "operational glass workspace",
+  "colors": {
+    "canvas": "#f7f7f7",
+    "ink": "#0b1320",
+    "muted": "#7a7a7a",
+    "primary": "#0b0f14",
+    "success": "#76fb91",
+    "surface": "rgba(255,255,255,.80)",
+    "surfaceStrong": "rgba(255,255,255,.92)",
+    "line": "rgba(11,19,32,.11)"
+  },
+  "radii": { "control": 12, "surface": 18, "pill": 999 },
+  "effects": { "blur": 18, "shadow": "0 18px 50px rgba(42,76,111,.11)" },
+  "typography": { "body": "Aptos", "headingTracking": "-0.055em" }
+}
